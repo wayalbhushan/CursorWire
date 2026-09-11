@@ -41,6 +41,8 @@ declare global {
     socket?: WebSocket;
     cursorwireSocket?: WebSocket;
     sendRaw?: (data: unknown) => void;
+    injectStaleCursor?: (staleSeq?: number) => void;
+    injectStaleReaction?: (staleSeq?: number) => void;
   }
 }
 
@@ -76,6 +78,7 @@ export default function App() {
   const [remoteCursors, setRemoteCursors] = useState<Record<string, RemoteCursor>>({});
   const [reactions, setReactions] = useState<ActiveReaction[]>([]);
   const [selectedEmoji, setSelectedEmoji] = useState<string>('🔥');
+  const [discardedStaleCount, setDiscardedStaleCount] = useState<number>(0);
 
   // References for socket, client id, and sequence numbers
   const socketRef = useRef<WebSocket | null>(null);
@@ -90,6 +93,13 @@ export default function App() {
    */
   const reactionSeqRef = useRef<number>(0);
   const selectedEmojiRef = useRef<string>('🔥');
+
+  /**
+   * Phase 7: Per-client, per-message-type sequence trackers
+   * Tracks the highest applied sequence number for each sender to discard out-of-order arrivals.
+   */
+  const lastAppliedCursorSeqRef = useRef<Map<string, number>>(new Map());
+  const lastAppliedReactionSeqRef = useRef<Map<string, number>>(new Map());
 
   // Throttling state references (outgoing)
   const lastSendTimeRef = useRef<number>(0);
@@ -163,6 +173,32 @@ export default function App() {
         socket.send(payload);
         console.log('[test harness] Sent message to server:', payload);
       };
+
+      // [DEV TEST HARNESS - Phase 7]
+      window.injectStaleCursor = (staleSeq = 1) => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        const msg: CursorMoveMessage = {
+          type: 'cursor-move',
+          x: 60,
+          y: 60,
+          seq: staleSeq,
+        };
+        socket.send(JSON.stringify(msg));
+        console.log(`[test harness] Injected stale cursor-move with seq: ${staleSeq} at (60, 60)`);
+      };
+
+      window.injectStaleReaction = (staleSeq = 1) => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        const msg: ReactionMessage = {
+          type: 'reaction',
+          x: 200,
+          y: 200,
+          emoji: '⚠️',
+          seq: staleSeq,
+        };
+        socket.send(JSON.stringify(msg));
+        console.log(`[test harness] Injected stale reaction with seq: ${staleSeq} at (200, 200)`);
+      };
     }
 
     socket.onopen = () => {
@@ -195,11 +231,13 @@ export default function App() {
           setClients(msg.clients);
           const activeIds = new Set(msg.clients.map((c) => c.id));
 
-          // Cleanup interpolation state for disconnected clients (prevents animation leaks / zombie targets)
+          // Cleanup interpolation state & sequence trackers for disconnected clients
           for (const id of Array.from(interpolationsRef.current.keys())) {
             if (!activeIds.has(id)) {
               interpolationsRef.current.delete(id);
               cursorDomRefs.current.delete(id);
+              lastAppliedCursorSeqRef.current.delete(id);
+              lastAppliedReactionSeqRef.current.delete(id);
             }
           }
 
@@ -219,50 +257,84 @@ export default function App() {
         }
 
         case 'cursor-move': {
-          if (msg.id && msg.id !== myIdRef.current) {
-            const now = performance.now();
-            const existing = interpolationsRef.current.get(msg.id);
+          if (!msg.id || msg.id === myIdRef.current) break;
 
-            if (!existing) {
-              // First position received for this remote client
-              interpolationsRef.current.set(msg.id, {
-                fromX: msg.x,
-                fromY: msg.y,
-                toX: msg.x,
-                toY: msg.y,
-                currX: msg.x,
-                currY: msg.y,
-                startTime: now,
-              });
-            } else {
-              // Smooth transition:
-              // Ease from current visible interpolated position to the newly received target
-              existing.fromX = existing.currX;
-              existing.fromY = existing.currY;
-              existing.toX = msg.x;
-              existing.toY = msg.y;
-              existing.startTime = now;
-            }
-
-            // Keep React state in sync for DevTools and UI coordinate indicators
-            setRemoteCursors((prev) => ({
-              ...prev,
-              [msg.id!]: {
-                id: msg.id!,
-                x: msg.x,
-                y: msg.y,
-                seq: msg.seq,
-              },
-            }));
+          /**
+           * Phase 7 Ordering Guard:
+           * Discard update if sequence number is less than or equal to the last applied sequence.
+           */
+          const lastSeq = lastAppliedCursorSeqRef.current.get(msg.id) ?? -1;
+          if (msg.seq <= lastSeq) {
+            console.warn(
+              `[ordering] Discarded stale cursor-move from ${msg.id} (seq: ${msg.seq} <= last: ${lastSeq})`
+            );
+            setDiscardedStaleCount((prev) => prev + 1);
+            break;
           }
+
+          // Monotonic progress: update tracker to highest sequence
+          lastAppliedCursorSeqRef.current.set(msg.id, msg.seq);
+
+          const now = performance.now();
+          const existing = interpolationsRef.current.get(msg.id);
+
+          if (!existing) {
+            // First position received for this remote client
+            interpolationsRef.current.set(msg.id, {
+              fromX: msg.x,
+              fromY: msg.y,
+              toX: msg.x,
+              toY: msg.y,
+              currX: msg.x,
+              currY: msg.y,
+              startTime: now,
+            });
+          } else {
+            // Smooth transition:
+            // Ease from current visible interpolated position to the newly received target
+            existing.fromX = existing.currX;
+            existing.fromY = existing.currY;
+            existing.toX = msg.x;
+            existing.toY = msg.y;
+            existing.startTime = now;
+          }
+
+          // Keep React state in sync for DevTools and UI coordinate indicators
+          setRemoteCursors((prev) => ({
+            ...prev,
+            [msg.id!]: {
+              id: msg.id!,
+              x: msg.x,
+              y: msg.y,
+              seq: msg.seq,
+            },
+          }));
           break;
         }
 
         case 'reaction': {
-          console.log(`[reaction received] From ${msg.id}: ${msg.emoji} at (${msg.x}, ${msg.y})`);
+          const senderId = msg.id || 'unknown';
+
+          /**
+           * Phase 7 Ordering Guard:
+           * Discard reaction if sequence number is less than or equal to the last applied sequence.
+           */
+          const lastSeq = lastAppliedReactionSeqRef.current.get(senderId) ?? -1;
+          if (msg.seq <= lastSeq) {
+            console.warn(
+              `[ordering] Discarded stale reaction from ${senderId} (seq: ${msg.seq} <= last: ${lastSeq})`
+            );
+            setDiscardedStaleCount((prev) => prev + 1);
+            break;
+          }
+
+          // Monotonic progress: update tracker to highest sequence
+          lastAppliedReactionSeqRef.current.set(senderId, msg.seq);
+
+          console.log(`[reaction received] From ${senderId}: ${msg.emoji} at (${msg.x}, ${msg.y}) (seq: ${msg.seq})`);
           const newReaction: ActiveReaction = {
-            key: `${msg.id || 'anon'}-${msg.seq}-${Date.now()}-${Math.random()}`,
-            id: msg.id || 'unknown',
+            key: `${senderId}-${msg.seq}-${Date.now()}-${Math.random()}`,
+            id: senderId,
             x: msg.x,
             y: msg.y,
             emoji: msg.emoji,
@@ -296,6 +368,8 @@ export default function App() {
       setReactions([]);
       interpolationsRef.current.clear();
       cursorDomRefs.current.clear();
+      lastAppliedCursorSeqRef.current.clear();
+      lastAppliedReactionSeqRef.current.clear();
     };
 
     socket.onerror = (error) => {
@@ -371,7 +445,7 @@ export default function App() {
         emoji: selectedEmojiRef.current,
         seq: reactionSeqRef.current,
       };
-      console.log(`[reaction emit] Sending ${reactionMsg.emoji} at (${reactionMsg.x}, ${reactionMsg.y})`);
+      console.log(`[reaction emit] Sending ${reactionMsg.emoji} at (${reactionMsg.x}, ${reactionMsg.y}) (seq: ${reactionMsg.seq})`);
       socket.send(JSON.stringify(reactionMsg));
     };
 
@@ -389,6 +463,8 @@ export default function App() {
         delete window.socket;
         delete window.cursorwireSocket;
         delete window.sendRaw;
+        delete window.injectStaleCursor;
+        delete window.injectStaleReaction;
       }
       socket.close();
     };
@@ -587,7 +663,7 @@ export default function App() {
                       </span>
                     ) : (
                       <span style={{ fontSize: '0.75rem', color: '#6b7280', marginLeft: 'auto', fontFamily: 'monospace' }}>
-                        {remote ? `x: ${remote.x}, y: ${remote.y}` : 'idle'}
+                        {remote ? `x: ${remote.x}, y: ${remote.y} (seq: ${remote.seq})` : 'idle'}
                       </span>
                     )}
                   </li>
@@ -597,15 +673,57 @@ export default function App() {
           )}
         </section>
 
-        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff' }}>
-          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 6: Multi-client Emoji Bursts Active</h4>
-          <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem', color: '#4b5563' }}>
-            Clicking emits an animated emoji burst broadcast to all clients (including sender). Each burst animates and cleans up independently over 900ms without affecting cursor interpolation.
+        {/* [DEV TEST HARNESS - Phase 7] Ordering Verification */}
+        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff', marginBottom: '1.5rem' }}>
+          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 7: Sequence Ordering & Stale Discarding</h4>
+          <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', color: '#4b5563' }}>
+            Updates with sequence numbers ≤ last applied sequence are discarded to prevent out-of-order jitter. Test via buttons below or console (<code>window.injectStaleCursor()</code>):
           </p>
+
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+            <button
+              type="button"
+              onClick={() => {
+                if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+                // Artificially inject stale cursor-move with sequence number 1
+                const staleCursor: CursorMoveMessage = {
+                  type: 'cursor-move',
+                  x: 60,
+                  y: 60,
+                  seq: 1,
+                };
+                socketRef.current.send(JSON.stringify(staleCursor));
+                console.log('[test harness] Sent artificially stale cursor-move (seq: 1) to server');
+              }}
+              style={{ padding: '0.4rem 0.7rem', cursor: 'pointer', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.85rem' }}
+            >
+              Inject Stale Cursor (seq: 1)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+                // Artificially inject stale reaction with sequence number 1
+                const staleReaction: ReactionMessage = {
+                  type: 'reaction',
+                  x: 200,
+                  y: 200,
+                  emoji: '⚠️',
+                  seq: 1,
+                };
+                socketRef.current.send(JSON.stringify(staleReaction));
+                console.log('[test harness] Sent artificially stale reaction (seq: 1) to server');
+              }}
+              style={{ padding: '0.4rem 0.7rem', cursor: 'pointer', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.85rem' }}
+            >
+              Inject Stale Reaction (seq: 1)
+            </button>
+          </div>
+
           <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: '#6b7280', flexWrap: 'wrap' }}>
-            <div>Cursor seq: <strong>{cursorSeqRef.current}</strong></div>
-            <div>Reaction seq: <strong>{reactionSeqRef.current}</strong></div>
-            <div>Active reactions: <strong>{reactions.length}</strong></div>
+            <div>Outgoing cursor seq: <strong>{cursorSeqRef.current}</strong></div>
+            <div>Outgoing reaction seq: <strong>{reactionSeqRef.current}</strong></div>
+            <div>Stale packets discarded locally: <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>{discardedStaleCount}</strong></div>
           </div>
         </section>
       </div>
