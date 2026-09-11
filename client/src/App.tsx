@@ -76,6 +76,8 @@ export default function App() {
   const [selectedEmoji, setSelectedEmoji] = useState<string>('🔥');
   const [discardedStaleCount, setDiscardedStaleCount] = useState<number>(0);
   const [showDevDrawer, setShowDevDrawer] = useState<boolean>(false);
+  const [localCoords, setLocalCoords] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [txSeq, setTxSeq] = useState<number>(0);
 
   // References for socket, client id, and sequence numbers
   const socketRef = useRef<WebSocket | null>(null);
@@ -109,6 +111,22 @@ export default function App() {
   useEffect(() => {
     selectedEmojiRef.current = selectedEmoji;
   }, [selectedEmoji]);
+
+  // Keyboard shortcut listener for reaction switching (keys 1-5)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      const num = parseInt(e.key, 10);
+      if (num >= 1 && num <= REACTION_EMOJIS.length) {
+        setSelectedEmoji(REACTION_EMOJIS[num - 1]);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   /**
    * Shared requestAnimationFrame Render Loop for Remote Cursors
@@ -388,6 +406,7 @@ export default function App() {
       if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
       cursorSeqRef.current += 1;
+      setTxSeq(cursorSeqRef.current);
       const msg: CursorMoveMessage = {
         type: 'cursor-move',
         x,
@@ -401,6 +420,7 @@ export default function App() {
     const handleMouseMove = (e: MouseEvent) => {
       const x = Math.round(e.clientX);
       const y = Math.round(e.clientY);
+      setLocalCoords({ x, y });
       const now = performance.now();
       const elapsed = now - lastSendTimeRef.current;
 
@@ -495,9 +515,12 @@ export default function App() {
         height: '100vh',
         overflow: 'hidden',
         userSelect: 'none',
-        backgroundColor: '#090a0f',
-        backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px)',
-        backgroundSize: '28px 28px',
+        backgroundColor: '#0a0c10',
+        backgroundImage: `
+          linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px)
+        `,
+        backgroundSize: '32px 32px',
       }}
     >
       {/* Active Reactions Layer (Discrete CSS Keyframe Bursts) */}
@@ -510,9 +533,9 @@ export default function App() {
             top: `${r.y}px`,
             pointerEvents: 'none',
             zIndex: 10000,
-            fontSize: '34px',
+            fontSize: '32px',
             animation: 'emojiBurst 900ms cubic-bezier(0.16, 1, 0.3, 1) forwards',
-            filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.4))',
+            filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.5))',
             userSelect: 'none',
           }}
         >
@@ -546,8 +569,8 @@ export default function App() {
           >
             {/* SVG Cursor Pointer with compensating offset so the visual tip (5.5, 3.5) lands precisely at (0, 0) */}
             <svg
-              width="24"
-              height="24"
+              width="22"
+              height="22"
               viewBox="0 0 24 24"
               fill="none"
               style={{
@@ -555,32 +578,33 @@ export default function App() {
                 left: '-5.5px',
                 top: '-3.5px',
                 overflow: 'visible',
-                filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.3))',
+                filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.4))',
               }}
             >
               <path
                 d="M5.5 3.5L18.5 11L12 13L9 20L5.5 3.5Z"
                 fill={color}
-                stroke="#ffffff"
+                stroke="#0a0c10"
                 strokeWidth="1.5"
                 strokeLinejoin="round"
               />
             </svg>
 
-            {/* Client ID Label Badge: absolutely positioned to prevent any layout shift on the arrow */}
+            {/* Client ID Label: sharp rectangular badge, no pill radius */}
             <div
               style={{
                 position: 'absolute',
-                left: '14px',
-                top: '16px',
-                padding: '2px 6px',
-                borderRadius: '4px',
+                left: '12px',
+                top: '14px',
+                padding: '1px 5px',
+                borderRadius: '2px',
                 backgroundColor: color,
                 color: '#ffffff',
-                fontSize: '11px',
+                fontFamily: 'var(--mono)',
+                fontSize: '10px',
                 fontWeight: 600,
-                letterSpacing: '0.5px',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.25)',
+                letterSpacing: '0.4px',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.35)',
                 whiteSpace: 'nowrap',
               }}
             >
@@ -590,76 +614,100 @@ export default function App() {
         );
       })}
 
-      {/* TOP FLOATING NAV: Brand + Presence Bar */}
+      {/* DOCKED TOP BAR: Brand, Connection Telemetry, and Active Peer Roster */}
       <header
         data-no-burst
         style={{
           position: 'fixed',
-          top: '16px',
-          left: '20px',
-          right: '20px',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: '42px',
+          background: '#0f1117',
+          borderBottom: '1px solid #1e222d',
           display: 'flex',
-          justifyContent: 'space-between',
           alignItems: 'center',
-          pointerEvents: 'none',
+          justifyContent: 'space-between',
+          padding: '0 16px',
           zIndex: 50,
+          userSelect: 'none',
         }}
       >
-        {/* Left: Brand & Status Pill */}
+        {/* Left: Brand Identity + Protocol Tag + Connection Status */}
         <div
           data-no-burst
           style={{
-            pointerEvents: 'auto',
             display: 'flex',
             alignItems: 'center',
-            gap: '10px',
-            background: 'rgba(18, 20, 29, 0.75)',
-            backdropFilter: 'blur(16px)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            padding: '6px 14px',
-            borderRadius: '24px',
+            gap: '12px',
           }}
         >
           <span
             style={{
+              fontFamily: 'var(--mono)',
               fontWeight: 700,
-              fontSize: '14px',
-              letterSpacing: '-0.3px',
-              color: '#f9fafb',
+              fontSize: '13px',
+              letterSpacing: '0.5px',
+              color: '#f3f4f6',
             }}
           >
-            cursorwire
+            CURSORWIRE
           </span>
+
+          <span
+            style={{
+              fontFamily: 'var(--mono)',
+              fontSize: '10px',
+              color: '#6b7280',
+              border: '1px solid #272c38',
+              borderRadius: '2px',
+              padding: '1px 5px',
+              background: '#141720',
+            }}
+          >
+            RAW-WS // V1
+          </span>
+
+          <div
+            style={{
+              width: '1px',
+              height: '14px',
+              background: '#222733',
+            }}
+          />
 
           <div
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              fontSize: '12px',
+              fontFamily: 'var(--mono)',
+              fontSize: '11px',
               color: '#9ca3af',
-              borderLeft: '1px solid rgba(255, 255, 255, 0.1)',
-              paddingLeft: '10px',
+              border: '1px solid #222733',
+              borderRadius: '2px',
+              padding: '2px 8px',
+              background: '#13161f',
             }}
           >
             <span
               style={{
-                width: 7,
-                height: 7,
-                borderRadius: '50%',
+                width: 6,
+                height: 6,
+                borderRadius: '1px',
                 backgroundColor:
                   status === 'connected'
                     ? '#10b981'
                     : status === 'reconnecting'
                     ? '#f59e0b'
                     : '#ef4444',
-                animation: status === 'connected' ? 'livePulse 2.5s infinite' : 'none',
+                animation: status === 'connected' ? 'liveDot 2.2s infinite' : 'none',
               }}
             />
             <span>
               {status === 'reconnecting'
-                ? `reconnecting (${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`
-                : status}
+                ? `RECONNECTING (${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`
+                : status.toUpperCase()}
             </span>
           </div>
 
@@ -668,88 +716,81 @@ export default function App() {
               type="button"
               onClick={manualReconnect}
               style={{
-                marginLeft: '4px',
                 padding: '2px 8px',
-                background: '#3b82f6',
-                color: '#ffffff',
-                border: 'none',
-                borderRadius: '12px',
+                fontFamily: 'var(--mono)',
                 fontSize: '11px',
+                background: 'rgba(59, 130, 246, 0.1)',
+                border: '1px solid #3b82f6',
+                color: '#60a5fa',
+                borderRadius: '2px',
                 cursor: 'pointer',
               }}
             >
-              Reconnect
+              RECONNECT
             </button>
           )}
         </div>
 
-        {/* Right: Presence Pill */}
+        {/* Right: Connected Peers Roster */}
         <div
           data-no-burst
           style={{
-            pointerEvents: 'auto',
             display: 'flex',
             alignItems: 'center',
             gap: '8px',
-            background: 'rgba(18, 20, 29, 0.75)',
-            backdropFilter: 'blur(16px)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            padding: '6px 12px',
-            borderRadius: '24px',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', marginRight: '4px' }}>
-            {clients.map((client, idx) => {
+          <span
+            style={{
+              fontFamily: 'var(--mono)',
+              fontSize: '11px',
+              color: '#6b7280',
+              textTransform: 'uppercase',
+            }}
+          >
+            PEERS ({clients.length}):
+          </span>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {clients.map((client) => {
               const isMe = myInfo?.id === client.id;
               return (
                 <div
                   key={client.id}
-                  title={`${client.id}${isMe ? ' (you)' : ''}`}
+                  title={`${client.id}${isMe ? ' (local client)' : ''}`}
                   style={{
-                    width: 22,
-                    height: 22,
-                    borderRadius: '50%',
-                    backgroundColor: client.color,
-                    border: '2px solid #090a0f',
-                    marginLeft: idx === 0 ? 0 : -6,
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: '10px',
-                    fontWeight: 700,
-                    color: '#ffffff',
-                    cursor: 'default',
-                    boxShadow: isMe ? `0 0 8px ${client.color}` : 'none',
+                    gap: '5px',
+                    fontFamily: 'var(--mono)',
+                    fontSize: '11px',
+                    padding: '2px 7px',
+                    borderRadius: '2px',
+                    background: isMe ? 'rgba(255, 255, 255, 0.05)' : '#13161f',
+                    border: isMe ? `1px solid ${client.color}` : '1px solid #222733',
+                    color: isMe ? '#f3f4f6' : '#9ca3af',
                   }}
                 >
-                  {client.id.slice(0, 1).toUpperCase()}
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '1px',
+                      backgroundColor: client.color,
+                    }}
+                  />
+                  <span>
+                    {client.id}
+                    {isMe ? ' (YOU)' : ''}
+                  </span>
                 </div>
               );
             })}
           </div>
-
-          <span style={{ fontSize: '12px', color: '#d1d5db', fontWeight: 500 }}>
-            {clients.length} {clients.length === 1 ? 'client' : 'clients'}
-          </span>
-
-          {myInfo && (
-            <span
-              style={{
-                fontSize: '11px',
-                color: myInfo.color,
-                fontWeight: 600,
-                background: 'rgba(255, 255, 255, 0.06)',
-                padding: '2px 6px',
-                borderRadius: '10px',
-              }}
-            >
-              you: {myInfo.id}
-            </span>
-          )}
         </div>
       </header>
 
-      {/* CENTER HINT WATERMARK */}
+      {/* CENTER CANVAS PROMPT */}
       <div
         style={{
           position: 'absolute',
@@ -758,35 +799,52 @@ export default function App() {
           transform: 'translate(-50%, -50%)',
           textAlign: 'center',
           pointerEvents: 'none',
-          color: 'rgba(255, 255, 255, 0.16)',
-          fontSize: '14px',
-          letterSpacing: '0.2px',
+          fontFamily: 'var(--mono)',
+          fontSize: '11px',
+          letterSpacing: '1.5px',
+          color: 'rgba(255, 255, 255, 0.12)',
+          textTransform: 'uppercase',
+          userSelect: 'none',
         }}
       >
-        <p style={{ margin: 0, fontWeight: 500 }}>Move mouse to sync cursor · Click to burst reaction</p>
+        <p style={{ margin: 0, fontWeight: 500 }}>
+          Shared Real-Time Canvas · Move to sync · Click to burst reaction
+        </p>
       </div>
 
-      {/* BOTTOM FLOATING DOCK: Reaction Toolbar */}
+      {/* REACTION PALETTE DOCK (Clean, professional tool palette above telemetry bar) */}
       <nav
         data-no-burst
         style={{
           position: 'fixed',
-          bottom: '24px',
+          bottom: '36px',
           left: '50%',
           transform: 'translateX(-50%)',
           display: 'flex',
           alignItems: 'center',
-          gap: '6px',
-          background: 'rgba(18, 20, 29, 0.85)',
-          backdropFilter: 'blur(20px)',
-          border: '1px solid rgba(255, 255, 255, 0.1)',
-          padding: '6px 10px',
-          borderRadius: '32px',
-          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+          gap: '4px',
+          background: '#12141a',
+          border: '1px solid #222733',
+          padding: '4px 6px',
+          borderRadius: '4px',
+          boxShadow: '0 4px 16px rgba(0, 0, 0, 0.5)',
           zIndex: 50,
         }}
       >
-        {REACTION_EMOJIS.map((emoji) => {
+        <span
+          style={{
+            fontFamily: 'var(--mono)',
+            fontSize: '10px',
+            color: '#6b7280',
+            padding: '0 6px 0 2px',
+            borderRight: '1px solid #222733',
+            marginRight: '2px',
+          }}
+        >
+          REACT:
+        </span>
+
+        {REACTION_EMOJIS.map((emoji, idx) => {
           const isSelected = selectedEmoji === emoji;
           return (
             <button
@@ -794,127 +852,195 @@ export default function App() {
               type="button"
               onClick={() => setSelectedEmoji(emoji)}
               style={{
-                fontSize: '20px',
-                padding: '6px 12px',
-                borderRadius: '24px',
-                border: isSelected ? `1.5px solid ${myInfo?.color || '#3b82f6'}` : '1.5px solid transparent',
-                background: isSelected ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                position: 'relative',
+                width: '36px',
+                height: '34px',
+                padding: 0,
+                borderRadius: '2px',
+                border: isSelected
+                  ? `1px solid ${myInfo?.color || '#3b82f6'}`
+                  : '1px solid transparent',
+                background: isSelected ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
                 cursor: 'pointer',
-                transition: 'all 0.15s ease',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                fontSize: '18px',
+                lineHeight: 1,
               }}
-              title={`Emit ${emoji}`}
+              title={`Reaction [${idx + 1}]: ${emoji}`}
             >
-              {emoji}
+              <span>{emoji}</span>
+              <span
+                style={{
+                  position: 'absolute',
+                  top: '1px',
+                  right: '2px',
+                  fontFamily: 'var(--mono)',
+                  fontSize: '8px',
+                  color: isSelected ? '#ffffff' : '#6b7280',
+                  lineHeight: 1,
+                }}
+              >
+                {idx + 1}
+              </span>
             </button>
           );
         })}
       </nav>
 
-      {/* BOTTOM-LEFT: Minimal Engineering Telemetry Readout */}
+      {/* DOCKED BOTTOM STATUS / TELEMETRY BAR (Full width engineering status bar) */}
       <footer
         style={{
           position: 'fixed',
-          bottom: '16px',
-          left: '20px',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: '26px',
+          background: '#0d0f14',
+          borderTop: '1px solid #1e222d',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 14px',
           fontFamily: 'var(--mono)',
           fontSize: '11px',
-          color: 'rgba(255, 255, 255, 0.3)',
-          pointerEvents: 'none',
-          zIndex: 40,
+          color: '#6b7280',
+          zIndex: 45,
+          userSelect: 'none',
         }}
       >
-        raw ws · 30Hz throttled · 100ms LERP buffer · seq: {cursorSeqRef.current}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span>PORT: 8080 (WS)</span>
+          <span style={{ color: '#272c38' }}>|</span>
+          <span>RATE: 30HZ THROTTLED</span>
+          <span style={{ color: '#272c38' }}>|</span>
+          <span>INTERP: 100MS LERP</span>
+          <span style={{ color: '#272c38' }}>|</span>
+          <span>TX SEQ: #{txSeq}</span>
+          <span style={{ color: '#272c38' }}>|</span>
+          <span>
+            DROPPED STALE:{' '}
+            <strong style={{ color: discardedStaleCount > 0 ? '#f59e0b' : '#6b7280' }}>
+              {discardedStaleCount}
+            </strong>
+          </span>
+          <span style={{ color: '#272c38' }}>|</span>
+          <span>
+            POS: X:{localCoords.x} Y:{localCoords.y}
+          </span>
+        </div>
+
+        {/* Right side of status bar: Dev drawer toggle */}
+        {import.meta.env.DEV && (
+          <div data-no-burst style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              type="button"
+              onClick={() => setShowDevDrawer(!showDevDrawer)}
+              style={{
+                fontFamily: 'var(--mono)',
+                fontSize: '10px',
+                padding: '1px 6px',
+                background: showDevDrawer ? 'rgba(59, 130, 246, 0.15)' : 'transparent',
+                border: '1px solid #2a313d',
+                borderRadius: '2px',
+                color: showDevDrawer ? '#60a5fa' : '#9ca3af',
+                cursor: 'pointer',
+              }}
+            >
+              {showDevDrawer ? '✕ CLOSE DEV' : '⚙ DEV TOOLS'}
+            </button>
+          </div>
+        )}
       </footer>
 
-      {/* BOTTOM-RIGHT: Dev Tools Trigger & Drawer (Gated behind import.meta.env.DEV) */}
-      {import.meta.env.DEV && (
+      {/* DEV TOOLS DRAWER (Anchored above status bar) */}
+      {import.meta.env.DEV && showDevDrawer && (
         <div
           data-no-burst
           style={{
             position: 'fixed',
-            bottom: '16px',
-            right: '20px',
+            bottom: '32px',
+            right: '12px',
+            width: '280px',
+            background: '#12141a',
+            border: '1px solid #222733',
+            borderRadius: '4px',
+            padding: '12px',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.6)',
+            fontSize: '11px',
+            color: '#d1d5db',
             zIndex: 60,
           }}
         >
-          <button
-            type="button"
-            onClick={() => setShowDevDrawer(!showDevDrawer)}
+          <div
             style={{
-              padding: '4px 10px',
-              fontSize: '11px',
               fontFamily: 'var(--mono)',
-              background: 'rgba(18, 20, 29, 0.75)',
-              backdropFilter: 'blur(12px)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: '16px',
-              color: 'rgba(255, 255, 255, 0.5)',
-              cursor: 'pointer',
+              fontWeight: 600,
+              marginBottom: '8px',
+              color: '#f3f4f6',
+              fontSize: '11px',
+              borderBottom: '1px solid #1e222d',
+              paddingBottom: '4px',
             }}
           >
-            {showDevDrawer ? '✕ Close Dev' : '⚙ Dev Test'}
-          </button>
-
-          {showDevDrawer && (
-            <div
+            DEV VERIFICATION CONTROLS
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+            <button
+              type="button"
+              onClick={() => window.injectStaleCursor?.(1)}
               style={{
-                position: 'absolute',
-                bottom: '36px',
-                right: '0',
-                width: '280px',
-                background: 'rgba(14, 16, 24, 0.95)',
-                backdropFilter: 'blur(20px)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                borderRadius: '12px',
-                padding: '12px',
-                boxShadow: '0 12px 36px rgba(0, 0, 0, 0.6)',
-                fontSize: '11px',
-                color: '#d1d5db',
+                padding: '4px 8px',
+                background: 'rgba(245, 158, 11, 0.12)',
+                border: '1px solid rgba(245, 158, 11, 0.35)',
+                color: '#fbbf24',
+                borderRadius: '2px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                fontFamily: 'var(--mono)',
+                fontSize: '10px',
               }}
             >
-              <div style={{ fontWeight: 600, marginBottom: '8px', color: '#f3f4f6' }}>Dev Verification Controls</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
-                <button
-                  type="button"
-                  onClick={() => window.injectStaleCursor?.(1)}
-                  style={{
-                    padding: '4px 8px',
-                    background: 'rgba(245, 158, 11, 0.15)',
-                    border: '1px solid rgba(245, 158, 11, 0.4)',
-                    color: '#fbbf24',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                  }}
-                >
-                  Inject Stale Cursor (seq: 1)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => window.injectStaleReaction?.(1)}
-                  style={{
-                    padding: '4px 8px',
-                    background: 'rgba(245, 158, 11, 0.15)',
-                    border: '1px solid rgba(245, 158, 11, 0.4)',
-                    color: '#fbbf24',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    textAlign: 'left',
-                  }}
-                >
-                  Inject Stale Reaction (seq: 1)
-                </button>
-              </div>
-              <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '6px', color: '#9ca3af' }}>
-                <div>Stale packets dropped: <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>{discardedStaleCount}</strong></div>
-              </div>
+              Inject Stale Cursor (seq: 1)
+            </button>
+            <button
+              type="button"
+              onClick={() => window.injectStaleReaction?.(1)}
+              style={{
+                padding: '4px 8px',
+                background: 'rgba(245, 158, 11, 0.12)',
+                border: '1px solid rgba(245, 158, 11, 0.35)',
+                color: '#fbbf24',
+                borderRadius: '2px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                fontFamily: 'var(--mono)',
+                fontSize: '10px',
+              }}
+            >
+              Inject Stale Reaction (seq: 1)
+            </button>
+          </div>
+          <div
+            style={{
+              borderTop: '1px solid #1e222d',
+              paddingTop: '6px',
+              fontFamily: 'var(--mono)',
+              fontSize: '10px',
+              color: '#9ca3af',
+            }}
+          >
+            <div>
+              Stale packets dropped:{' '}
+              <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>
+                {discardedStaleCount}
+              </strong>
             </div>
-          )}
+          </div>
         </div>
       )}
     </div>
   );
 }
+

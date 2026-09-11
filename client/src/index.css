@@ -1,12 +1,13 @@
 :root {
-  --bg-canvas: #090a0f;
-  --panel-bg: rgba(18, 20, 29, 0.8);
-  --panel-border: rgba(255, 255, 255, 0.08);
-  --text-primary: #f9fafb;
+  --bg-canvas: #0b0c10;
+  --panel-bg: #12141a;
+  --panel-border: #1e222d;
+  --panel-border-subtle: rgba(255, 255, 255, 0.06);
+  --text-primary: #f3f4f6;
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
-  --sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', Oxygen, Ubuntu, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
 
   font-family: var(--sans);
   color-scheme: dark;
@@ -32,31 +33,30 @@ html, body, #root {
 /* Discrete reaction burst animation */
 @keyframes emojiBurst {
   0% {
-    transform: translate3d(-50%, -50%, 0) scale(0.3);
+    transform: translate3d(-50%, -50%, 0) scale(0.4);
     opacity: 0;
   }
   15% {
-    transform: translate3d(-50%, -50%, 0) scale(1.35);
+    transform: translate3d(-50%, -50%, 0) scale(1.2);
     opacity: 1;
   }
-  65% {
-    transform: translate3d(-50%, -45px, 0) scale(1.1);
+  70% {
+    transform: translate3d(-50%, -40px, 0) scale(1.05);
     opacity: 0.95;
   }
   100% {
-    transform: translate3d(-50%, -75px, 0) scale(0.75);
+    transform: translate3d(-50%, -65px, 0) scale(0.8);
     opacity: 0;
   }
 }
 
-/* Subtle live status pulse */
-@keyframes livePulse {
+/* Precise status indicator pulse */
+@keyframes liveDot {
   0%, 100% {
-    transform: scale(1);
     opacity: 1;
   }
   50% {
-    transform: scale(1.35);
-    opacity: 0.45;
+    opacity: 0.4;
   }
 }
+
