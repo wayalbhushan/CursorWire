@@ -259,7 +259,7 @@ export default function App() {
         }
 
         case 'reaction': {
-          // Phase 6: Render incoming reaction burst (including our own echoed reaction)
+          console.log(`[reaction received] From ${msg.id}: ${msg.emoji} at (${msg.x}, ${msg.y})`);
           const newReaction: ActiveReaction = {
             key: `${msg.id || 'anon'}-${msg.seq}-${Date.now()}-${Math.random()}`,
             id: msg.id || 'unknown',
@@ -371,6 +371,7 @@ export default function App() {
         emoji: selectedEmojiRef.current,
         seq: reactionSeqRef.current,
       };
+      console.log(`[reaction emit] Sending ${reactionMsg.emoji} at (${reactionMsg.x}, ${reactionMsg.y})`);
       socket.send(JSON.stringify(reactionMsg));
     };
 
