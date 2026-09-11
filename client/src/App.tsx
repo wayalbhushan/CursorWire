@@ -257,6 +257,43 @@ export default function App() {
             break;
           }
 
+          case 'presence-snapshot': {
+            console.log(`[ws snapshot] Received late-join cursor snapshot for ${msg.cursors.length} clients:`, msg.cursors);
+            const now = performance.now();
+            const initialRemoteCursors: Record<string, RemoteCursor> = {};
+
+            for (const cursor of msg.cursors) {
+              if (cursor.id === myIdRef.current) continue;
+
+              // Direct initial placement: seed interpolation with identical from/to so it renders statically immediately
+              interpolationsRef.current.set(cursor.id, {
+                fromX: cursor.x,
+                fromY: cursor.y,
+                toX: cursor.x,
+                toY: cursor.y,
+                currX: cursor.x,
+                currY: cursor.y,
+                startTime: now,
+              });
+
+              // Seed sequence tracker to prevent any pre-snapshot stale updates from applying
+              lastAppliedCursorSeqRef.current.set(cursor.id, cursor.seq);
+
+              initialRemoteCursors[cursor.id] = {
+                id: cursor.id,
+                x: cursor.x,
+                y: cursor.y,
+                seq: cursor.seq,
+              };
+            }
+
+            setRemoteCursors((prev) => ({
+              ...prev,
+              ...initialRemoteCursors,
+            }));
+            break;
+          }
+
           case 'cursor-move': {
             if (!msg.id || msg.id === myIdRef.current) break;
 

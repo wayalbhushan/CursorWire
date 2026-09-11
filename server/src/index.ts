@@ -5,6 +5,8 @@ import {
   type SocketMessage,
   type WelcomeMessage,
   type PresenceUpdateMessage,
+  type PresenceSnapshotMessage,
+  type CursorSnapshot,
   type ErrorMessage,
   type ClientInfo,
 } from '../../shared/protocol.js';
@@ -28,6 +30,7 @@ interface ClientSession {
   color: string;
   socket: WebSocket;
   isAlive: boolean;
+  lastPosition?: { x: number; y: number; seq: number };
 }
 
 // In-memory registry of active client connections: clientId -> ClientSession
@@ -160,6 +163,29 @@ wss.on('connection', (ws) => {
   // 2. Broadcast updated presence list to ALL clients (including the newcomer)
   broadcastPresence();
 
+  // 3. Phase 9 Late-Join Snapshot:
+  // Immediately provide the newcomer with the last known cursor positions of all other active participants.
+  // Note: Clients who haven't moved their mouse yet are omitted from the snapshot until their first move.
+  const existingCursors: CursorSnapshot[] = [];
+  for (const [existingId, existingSession] of clients.entries()) {
+    if (existingId !== clientId && existingSession.lastPosition) {
+      existingCursors.push({
+        id: existingId,
+        x: existingSession.lastPosition.x,
+        y: existingSession.lastPosition.y,
+        seq: existingSession.lastPosition.seq,
+      });
+    }
+  }
+
+  if (existingCursors.length > 0) {
+    const snapshotMsg: PresenceSnapshotMessage = {
+      type: 'presence-snapshot',
+      cursors: existingCursors,
+    };
+    ws.send(JSON.stringify(snapshotMsg));
+  }
+
   // Handle incoming messages with strict protocol validation
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
@@ -189,8 +215,15 @@ wss.on('connection', (ws) => {
 
     const message = result.data;
 
-    // Phase 4: Relay cursor movement to all OTHER clients
+    // Phase 4 & Phase 9: Record last known position and relay cursor movement to other clients
     if (message.type === 'cursor-move') {
+      // Record position in server state for late-joining clients
+      session.lastPosition = {
+        x: message.x,
+        y: message.y,
+        seq: message.seq,
+      };
+
       // Security note: Overwrite client-supplied id with the trusted session clientId
       broadcast(
         {

@@ -10,6 +10,13 @@ export interface ClientInfo {
   color: string;
 }
 
+export interface CursorSnapshot {
+  id: string;
+  x: number;
+  y: number;
+  seq: number;
+}
+
 // 1. Join: Client announces its connection to the server
 export interface JoinMessage {
   type: 'join';
@@ -28,7 +35,13 @@ export interface PresenceUpdateMessage {
   clients: ClientInfo[];
 }
 
-// 4. Cursor Move: Client emits position updates, server relays to other clients
+// 4. Presence Snapshot: Server sends full cursor positions of existing clients to a newly connected client
+export interface PresenceSnapshotMessage {
+  type: 'presence-snapshot';
+  cursors: CursorSnapshot[];
+}
+
+// 5. Cursor Move: Client emits position updates, server relays to other clients
 export interface CursorMoveMessage {
   type: 'cursor-move';
   id?: string; // Client ID stamped by server when broadcasting to other clients
@@ -37,7 +50,7 @@ export interface CursorMoveMessage {
   seq: number;
 }
 
-// 5. Reaction: Client emits emoji reaction burst, server relays to other clients
+// 6. Reaction: Client emits emoji reaction burst, server relays to other clients
 export interface ReactionMessage {
   type: 'reaction';
   id?: string; // Client ID stamped by server when broadcasting to other clients
@@ -47,13 +60,13 @@ export interface ReactionMessage {
   seq: number;
 }
 
-// 6. Leave: Server informs clients that a specific client has disconnected
+// 7. Leave: Server informs clients that a specific client has disconnected
 export interface LeaveMessage {
   type: 'leave';
   id: string;
 }
 
-// 7. Error: Server informs client of an invalid, rejected, or malformed message
+// 8. Error: Server informs client of an invalid, rejected, or malformed message
 export interface ErrorMessage {
   type: 'error';
   message: string;
@@ -64,6 +77,7 @@ export type SocketMessage =
   | JoinMessage
   | WelcomeMessage
   | PresenceUpdateMessage
+  | PresenceSnapshotMessage
   | CursorMoveMessage
   | ReactionMessage
   | LeaveMessage
@@ -127,6 +141,38 @@ export function validateMessage(raw: unknown): ValidationResult {
         data: {
           type: 'presence-update',
           clients: obj.clients as ClientInfo[],
+        },
+      };
+    }
+
+    case 'presence-snapshot': {
+      if (!Array.isArray(obj.cursors)) {
+        return { success: false, error: 'Presence-snapshot "cursors" must be an array' };
+      }
+      for (let i = 0; i < obj.cursors.length; i++) {
+        const item = obj.cursors[i];
+        if (typeof item !== 'object' || item === null) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} must be an object` };
+        }
+        const c = item as Record<string, unknown>;
+        if (typeof c.id !== 'string' || c.id.trim() === '') {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} missing valid "id"` };
+        }
+        if (typeof c.x !== 'number' || !Number.isFinite(c.x)) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} invalid "x"` };
+        }
+        if (typeof c.y !== 'number' || !Number.isFinite(c.y)) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} invalid "y"` };
+        }
+        if (typeof c.seq !== 'number' || !Number.isInteger(c.seq) || c.seq < 0) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} invalid "seq"` };
+        }
+      }
+      return {
+        success: true,
+        data: {
+          type: 'presence-snapshot',
+          cursors: obj.cursors as CursorSnapshot[],
         },
       };
     }
