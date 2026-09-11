@@ -75,6 +75,7 @@ export default function App() {
   const [reactions, setReactions] = useState<ActiveReaction[]>([]);
   const [selectedEmoji, setSelectedEmoji] = useState<string>('🔥');
   const [discardedStaleCount, setDiscardedStaleCount] = useState<number>(0);
+  const [showDevDrawer, setShowDevDrawer] = useState<boolean>(false);
 
   // References for socket, client id, and sequence numbers
   const socketRef = useRef<WebSocket | null>(null);
@@ -111,8 +112,6 @@ export default function App() {
 
   /**
    * Shared requestAnimationFrame Render Loop for Remote Cursors
-   * Runs once per frame (~60Hz / 120Hz / 144Hz depending on monitor refresh rate).
-   * Directly updates DOM node transforms using calculated lerp values to prevent React re-render overhead.
    */
   useEffect(() => {
     let animFrameId: number;
@@ -144,7 +143,7 @@ export default function App() {
   }, []);
 
   /**
-   * Phase 8: Robust WebSocket Connection Lifecycle with Bounded Reconnect
+   * WebSocket Connection Lifecycle with Bounded Reconnect
    */
   useEffect(() => {
     isUnmountingRef.current = false;
@@ -152,22 +151,16 @@ export default function App() {
     const connect = () => {
       if (isUnmountingRef.current) return;
 
-      console.log(`[ws] Connecting to ${WS_URL}... (attempt ${reconnectAttemptsRef.current})`);
       const socket = new WebSocket(WS_URL);
       socketRef.current = socket;
 
-      // Dev mode console tools
       if (import.meta.env.DEV) {
         window.socket = socket;
         window.cursorwireSocket = socket;
         window.sendRaw = (data: unknown) => {
-          if (socket.readyState !== WebSocket.OPEN) {
-            console.warn(`[test harness] Cannot send — socket not open (readyState: ${socket.readyState})`);
-            return;
-          }
+          if (socket.readyState !== WebSocket.OPEN) return;
           const payload = typeof data === 'string' ? data : JSON.stringify(data);
           socket.send(payload);
-          console.log('[test harness] Sent message to server:', payload);
         };
 
         window.injectStaleCursor = (staleSeq = 1) => {
@@ -179,7 +172,6 @@ export default function App() {
             seq: staleSeq,
           };
           socket.send(JSON.stringify(msg));
-          console.log(`[test harness] Injected stale cursor-move with seq: ${staleSeq} at (60, 60)`);
         };
 
         window.injectStaleReaction = (staleSeq = 1) => {
@@ -192,12 +184,10 @@ export default function App() {
             seq: staleSeq,
           };
           socket.send(JSON.stringify(msg));
-          console.log(`[test harness] Injected stale reaction with seq: ${staleSeq} at (200, 200)`);
         };
       }
 
       socket.onopen = () => {
-        console.log('[ws] Connected to server');
         setStatus('connected');
         reconnectAttemptsRef.current = 0;
         setReconnectAttempt(0);
@@ -208,22 +198,15 @@ export default function App() {
       };
 
       socket.onmessage = (event) => {
-        if (typeof event.data !== 'string') {
-          console.warn('[ws incoming error] Non-string frame received from server');
-          return;
-        }
+        if (typeof event.data !== 'string') return;
 
         const result = parseAndValidateMessage(event.data);
-        if (!result.success) {
-          console.warn(`[ws incoming error] Message rejected: ${result.error}`, event.data);
-          return;
-        }
+        if (!result.success) return;
 
         const msg = result.data;
 
         switch (msg.type) {
           case 'welcome':
-            console.log(`[ws] Welcomed as client ${msg.id} with color ${msg.color}`);
             myIdRef.current = msg.id;
             setMyInfo({ id: msg.id, color: msg.color });
             break;
@@ -232,7 +215,6 @@ export default function App() {
             setClients(msg.clients);
             const activeIds = new Set(msg.clients.map((c) => c.id));
 
-            // Cleanup interpolation state & sequence trackers for disconnected clients
             for (const id of Array.from(interpolationsRef.current.keys())) {
               if (!activeIds.has(id)) {
                 interpolationsRef.current.delete(id);
@@ -242,7 +224,6 @@ export default function App() {
               }
             }
 
-            // Cleanup React state
             setRemoteCursors((prev) => {
               const next = { ...prev };
               let changed = false;
@@ -258,14 +239,12 @@ export default function App() {
           }
 
           case 'presence-snapshot': {
-            console.log(`[ws snapshot] Received late-join cursor snapshot for ${msg.cursors.length} clients:`, msg.cursors);
             const now = performance.now();
             const initialRemoteCursors: Record<string, RemoteCursor> = {};
 
             for (const cursor of msg.cursors) {
               if (cursor.id === myIdRef.current) continue;
 
-              // Direct initial placement: seed interpolation with identical from/to so it renders statically immediately
               interpolationsRef.current.set(cursor.id, {
                 fromX: cursor.x,
                 fromY: cursor.y,
@@ -276,7 +255,6 @@ export default function App() {
                 startTime: now,
               });
 
-              // Seed sequence tracker to prevent any pre-snapshot stale updates from applying
               lastAppliedCursorSeqRef.current.set(cursor.id, cursor.seq);
 
               initialRemoteCursors[cursor.id] = {
@@ -297,12 +275,8 @@ export default function App() {
           case 'cursor-move': {
             if (!msg.id || msg.id === myIdRef.current) break;
 
-            // Phase 7: Discard stale or out-of-order cursor updates
             const lastSeq = lastAppliedCursorSeqRef.current.get(msg.id) ?? -1;
             if (msg.seq <= lastSeq) {
-              console.warn(
-                `[ordering] Discarded stale cursor-move from ${msg.id} (seq: ${msg.seq} <= last: ${lastSeq})`
-              );
               setDiscardedStaleCount((prev) => prev + 1);
               break;
             }
@@ -345,19 +319,14 @@ export default function App() {
           case 'reaction': {
             const senderId = msg.id || 'unknown';
 
-            // Phase 7: Discard stale or out-of-order reactions
             const lastSeq = lastAppliedReactionSeqRef.current.get(senderId) ?? -1;
             if (msg.seq <= lastSeq) {
-              console.warn(
-                `[ordering] Discarded stale reaction from ${senderId} (seq: ${msg.seq} <= last: ${lastSeq})`
-              );
               setDiscardedStaleCount((prev) => prev + 1);
               break;
             }
 
             lastAppliedReactionSeqRef.current.set(senderId, msg.seq);
 
-            console.log(`[reaction received] From ${senderId}: ${msg.emoji} at (${msg.x}, ${msg.y}) (seq: ${msg.seq})`);
             const newReaction: ActiveReaction = {
               key: `${senderId}-${msg.seq}-${Date.now()}-${Math.random()}`,
               id: senderId,
@@ -374,17 +343,12 @@ export default function App() {
             break;
           }
 
-          case 'error':
-            console.warn('[ws] Server reported protocol error:', msg.message, msg.reason);
-            break;
-
           default:
             break;
         }
       };
 
-      socket.onclose = (event) => {
-        console.log(`[ws] Disconnected from server (code: ${event.code}, clean: ${event.wasClean})`);
+      socket.onclose = () => {
         myIdRef.current = null;
         setMyInfo(null);
         setClients([]);
@@ -395,13 +359,11 @@ export default function App() {
         lastAppliedCursorSeqRef.current.clear();
         lastAppliedReactionSeqRef.current.clear();
 
-        // If unmounting intentionally (e.g. user navigated away), do not reconnect
         if (isUnmountingRef.current) {
           setStatus('disconnected');
           return;
         }
 
-        // Phase 8: Bounded Exponential Backoff Reconnection
         if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
           reconnectAttemptsRef.current += 1;
           setReconnectAttempt(reconnectAttemptsRef.current);
@@ -411,26 +373,17 @@ export default function App() {
             BASE_RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttemptsRef.current - 1),
             6000
           );
-          console.log(
-            `[ws reconnect] Reconnect attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS} scheduled in ${Math.round(delay)}ms`
-          );
           reconnectTimeoutRef.current = setTimeout(connect, delay);
         } else {
-          console.warn(
-            `[ws reconnect] Maximum reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Ceasing retries.`
-          );
           setStatus('disconnected');
         }
       };
 
-      socket.onerror = (error) => {
-        console.error('[ws] Socket error observed:', error);
-      };
+      socket.onerror = () => {};
     };
 
     connect();
 
-    // Helper to transmit cursor position to server
     const transmitCursor = (x: number, y: number) => {
       if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
@@ -445,9 +398,6 @@ export default function App() {
       lastSendTimeRef.current = performance.now();
     };
 
-    /**
-     * Mousemove handler with strict ~30Hz (33ms) throttling.
-     */
     const handleMouseMove = (e: MouseEvent) => {
       const x = Math.round(e.clientX);
       const y = Math.round(e.clientY);
@@ -476,12 +426,9 @@ export default function App() {
       }
     };
 
-    /**
-     * Click handler to emit reaction burst.
-     */
     const handleCanvasClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('button, a, input, select, textarea, [role="button"]')) {
+      if (target && target.closest('button, a, input, select, textarea, [role="button"], [data-no-burst]')) {
         return;
       }
 
@@ -495,7 +442,6 @@ export default function App() {
         emoji: selectedEmojiRef.current,
         seq: reactionSeqRef.current,
       };
-      console.log(`[reaction emit] Sending ${reactionMsg.emoji} at (${reactionMsg.x}, ${reactionMsg.y}) (seq: ${reactionMsg.seq})`);
       socketRef.current.send(JSON.stringify(reactionMsg));
     };
 
@@ -535,7 +481,6 @@ export default function App() {
     if (socketRef.current) {
       socketRef.current.close();
     }
-    // Trigger immediate reconnect
     const socket = new WebSocket(WS_URL);
     socketRef.current = socket;
   };
@@ -545,14 +490,14 @@ export default function App() {
   return (
     <div
       style={{
-        minHeight: '100vh',
-        width: '100vw',
-        padding: '2rem',
-        boxSizing: 'border-box',
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        userSelect: 'none',
         position: 'relative',
+        width: '100vw',
+        height: '100vh',
         overflow: 'hidden',
+        userSelect: 'none',
+        backgroundColor: '#090a0f',
+        backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px)',
+        backgroundSize: '28px 28px',
       }}
     >
       {/* Active Reactions Layer (Discrete CSS Keyframe Bursts) */}
@@ -565,9 +510,9 @@ export default function App() {
             top: `${r.y}px`,
             pointerEvents: 'none',
             zIndex: 10000,
-            fontSize: '32px',
+            fontSize: '34px',
             animation: 'emojiBurst 900ms cubic-bezier(0.16, 1, 0.3, 1) forwards',
-            filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.3))',
+            filter: 'drop-shadow(0 4px 12px rgba(0,0,0,0.4))',
             userSelect: 'none',
           }}
         >
@@ -645,157 +590,331 @@ export default function App() {
         );
       })}
 
-      {/* Main Application Information & Presence UI */}
-      <div style={{ maxWidth: '640px' }}>
-        <header style={{ marginBottom: '1.5rem', borderBottom: '1px solid #e5e7eb', paddingBottom: '1rem' }}>
-          <h1 style={{ margin: '0 0 0.25rem' }}>cursorwire</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.95rem', flexWrap: 'wrap' }}>
+      {/* TOP FLOATING NAV: Brand + Presence Bar */}
+      <header
+        data-no-burst
+        style={{
+          position: 'fixed',
+          top: '16px',
+          left: '20px',
+          right: '20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          pointerEvents: 'none',
+          zIndex: 50,
+        }}
+      >
+        {/* Left: Brand & Status Pill */}
+        <div
+          data-no-burst
+          style={{
+            pointerEvents: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            background: 'rgba(18, 20, 29, 0.75)',
+            backdropFilter: 'blur(16px)',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
+            padding: '6px 14px',
+            borderRadius: '24px',
+          }}
+        >
+          <span
+            style={{
+              fontWeight: 700,
+              fontSize: '14px',
+              letterSpacing: '-0.3px',
+              color: '#f9fafb',
+            }}
+          >
+            cursorwire
+          </span>
+
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '12px',
+              color: '#9ca3af',
+              borderLeft: '1px solid rgba(255, 255, 255, 0.1)',
+              paddingLeft: '10px',
+            }}
+          >
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: '50%',
+                backgroundColor:
+                  status === 'connected'
+                    ? '#10b981'
+                    : status === 'reconnecting'
+                    ? '#f59e0b'
+                    : '#ef4444',
+                animation: status === 'connected' ? 'livePulse 2.5s infinite' : 'none',
+              }}
+            />
             <span>
-              Status:{' '}
-              <strong
-                style={{
-                  color:
-                    status === 'connected'
-                      ? '#10b981'
-                      : status === 'reconnecting'
-                      ? '#f59e0b'
-                      : '#ef4444',
-                }}
-              >
-                {status === 'reconnecting'
-                  ? `reconnecting (attempt ${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})...`
-                  : status}
-              </strong>
+              {status === 'reconnecting'
+                ? `reconnecting (${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`
+                : status}
             </span>
-
-            {status === 'disconnected' && (
-              <button
-                type="button"
-                onClick={manualReconnect}
-                style={{
-                  padding: '2px 8px',
-                  background: '#3b82f6',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.8rem',
-                }}
-              >
-                Reconnect Now
-              </button>
-            )}
-
-            {myInfo && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
-                • You:
-                <span style={{ width: 12, height: 12, borderRadius: '50%', background: myInfo.color, display: 'inline-block' }} />
-                <code>{myInfo.id}</code>
-              </span>
-            )}
           </div>
-        </header>
 
-        {/* Reaction Selector Toolbar */}
-        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff', marginBottom: '1.5rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
-            <div>
-              <h4 style={{ margin: '0 0 0.25rem', fontSize: '0.95rem' }}>Tap-to-Emit Reaction</h4>
-              <p style={{ margin: 0, fontSize: '0.85rem', color: '#6b7280' }}>
-                Click anywhere on the screen to burst your reaction to everyone!
-              </p>
-            </div>
-            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-              {REACTION_EMOJIS.map((emoji) => (
-                <button
-                  key={emoji}
-                  type="button"
-                  onClick={() => setSelectedEmoji(emoji)}
-                  style={{
-                    fontSize: '1.25rem',
-                    padding: '0.35rem 0.55rem',
-                    borderRadius: '6px',
-                    border: selectedEmoji === emoji ? '2px solid #3b82f6' : '1px solid #e5e7eb',
-                    background: selectedEmoji === emoji ? '#eff6ff' : '#ffffff',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                  }}
-                  title={`Select ${emoji}`}
-                >
-                  {emoji}
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* Presence List */}
-        <section style={{ padding: '1.25rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#f9fafb', marginBottom: '1.5rem' }}>
-          <h3 style={{ margin: '0 0 0.75rem' }}>Active Room Presence ({clients.length})</h3>
-          {clients.length === 0 ? (
-            <p style={{ margin: 0, color: '#6b7280', fontSize: '0.9rem' }}>
-              {status === 'connected' ? 'No other clients in room.' : 'Connecting to room...'}
-            </p>
-          ) : (
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              {clients.map((client) => {
-                const isMe = myInfo?.id === client.id;
-                const remote = remoteCursors[client.id];
-                return (
-                  <li
-                    key={client.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.5rem',
-                      padding: '0.4rem 0.6rem',
-                      background: '#ffffff',
-                      borderRadius: '6px',
-                      border: isMe ? `1.5px solid ${client.color}` : '1px solid #e5e7eb',
-                      fontSize: '0.9rem',
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 12,
-                        height: 12,
-                        borderRadius: '50%',
-                        backgroundColor: client.color,
-                        flexShrink: 0,
-                      }}
-                    />
-                    <code>{client.id}</code>
-                    {isMe ? (
-                      <span style={{ fontSize: '0.75rem', fontWeight: 600, color: client.color, marginLeft: 'auto' }}>
-                        (you)
-                      </span>
-                    ) : (
-                      <span style={{ fontSize: '0.75rem', color: '#6b7280', marginLeft: 'auto', fontFamily: 'monospace' }}>
-                        {remote ? `x: ${remote.x}, y: ${remote.y} (seq: ${remote.seq})` : 'idle'}
-                      </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+          {status === 'disconnected' && (
+            <button
+              type="button"
+              onClick={manualReconnect}
+              style={{
+                marginLeft: '4px',
+                padding: '2px 8px',
+                background: '#3b82f6',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '12px',
+                fontSize: '11px',
+                cursor: 'pointer',
+              }}
+            >
+              Reconnect
+            </button>
           )}
-        </section>
+        </div>
 
-        {/* Phase 8 Reconnect Policy & Phase 7 Ordering Status */}
-        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff' }}>
-          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 8: Heartbeat & Reconnection Policy</h4>
-          <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem', color: '#4b5563' }}>
-            Server transmits <strong>ping/pong heartbeats every 10s</strong>. Unresponsive connections are terminated after ~20s. On disconnect, clients auto-reconnect with <strong>exponential backoff (up to 5 attempts)</strong> and obtain a clean identity without ghost cursors.
-          </p>
-
-          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: '#6b7280', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-            <div>Cursor seq: <strong>{cursorSeqRef.current}</strong></div>
-            <div>Reaction seq: <strong>{reactionSeqRef.current}</strong></div>
-            <div>Stale discarded: <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>{discardedStaleCount}</strong></div>
-            <div>Reconnect attempts: <strong>{reconnectAttempt}/{MAX_RECONNECT_ATTEMPTS}</strong></div>
+        {/* Right: Presence Pill */}
+        <div
+          data-no-burst
+          style={{
+            pointerEvents: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            background: 'rgba(18, 20, 29, 0.75)',
+            backdropFilter: 'blur(16px)',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
+            padding: '6px 12px',
+            borderRadius: '24px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', marginRight: '4px' }}>
+            {clients.map((client, idx) => {
+              const isMe = myInfo?.id === client.id;
+              return (
+                <div
+                  key={client.id}
+                  title={`${client.id}${isMe ? ' (you)' : ''}`}
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: '50%',
+                    backgroundColor: client.color,
+                    border: '2px solid #090a0f',
+                    marginLeft: idx === 0 ? 0 : -6,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    color: '#ffffff',
+                    cursor: 'default',
+                    boxShadow: isMe ? `0 0 8px ${client.color}` : 'none',
+                  }}
+                >
+                  {client.id.slice(0, 1).toUpperCase()}
+                </div>
+              );
+            })}
           </div>
-        </section>
+
+          <span style={{ fontSize: '12px', color: '#d1d5db', fontWeight: 500 }}>
+            {clients.length} {clients.length === 1 ? 'client' : 'clients'}
+          </span>
+
+          {myInfo && (
+            <span
+              style={{
+                fontSize: '11px',
+                color: myInfo.color,
+                fontWeight: 600,
+                background: 'rgba(255, 255, 255, 0.06)',
+                padding: '2px 6px',
+                borderRadius: '10px',
+              }}
+            >
+              you: {myInfo.id}
+            </span>
+          )}
+        </div>
+      </header>
+
+      {/* CENTER HINT WATERMARK */}
+      <div
+        style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          textAlign: 'center',
+          pointerEvents: 'none',
+          color: 'rgba(255, 255, 255, 0.16)',
+          fontSize: '14px',
+          letterSpacing: '0.2px',
+        }}
+      >
+        <p style={{ margin: 0, fontWeight: 500 }}>Move mouse to sync cursor · Click to burst reaction</p>
       </div>
+
+      {/* BOTTOM FLOATING DOCK: Reaction Toolbar */}
+      <nav
+        data-no-burst
+        style={{
+          position: 'fixed',
+          bottom: '24px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          background: 'rgba(18, 20, 29, 0.85)',
+          backdropFilter: 'blur(20px)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          padding: '6px 10px',
+          borderRadius: '32px',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)',
+          zIndex: 50,
+        }}
+      >
+        {REACTION_EMOJIS.map((emoji) => {
+          const isSelected = selectedEmoji === emoji;
+          return (
+            <button
+              key={emoji}
+              type="button"
+              onClick={() => setSelectedEmoji(emoji)}
+              style={{
+                fontSize: '20px',
+                padding: '6px 12px',
+                borderRadius: '24px',
+                border: isSelected ? `1.5px solid ${myInfo?.color || '#3b82f6'}` : '1.5px solid transparent',
+                background: isSelected ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              title={`Emit ${emoji}`}
+            >
+              {emoji}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* BOTTOM-LEFT: Minimal Engineering Telemetry Readout */}
+      <footer
+        style={{
+          position: 'fixed',
+          bottom: '16px',
+          left: '20px',
+          fontFamily: 'var(--mono)',
+          fontSize: '11px',
+          color: 'rgba(255, 255, 255, 0.3)',
+          pointerEvents: 'none',
+          zIndex: 40,
+        }}
+      >
+        raw ws · 30Hz throttled · 100ms LERP buffer · seq: {cursorSeqRef.current}
+      </footer>
+
+      {/* BOTTOM-RIGHT: Dev Tools Trigger & Drawer (Gated behind import.meta.env.DEV) */}
+      {import.meta.env.DEV && (
+        <div
+          data-no-burst
+          style={{
+            position: 'fixed',
+            bottom: '16px',
+            right: '20px',
+            zIndex: 60,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setShowDevDrawer(!showDevDrawer)}
+            style={{
+              padding: '4px 10px',
+              fontSize: '11px',
+              fontFamily: 'var(--mono)',
+              background: 'rgba(18, 20, 29, 0.75)',
+              backdropFilter: 'blur(12px)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              borderRadius: '16px',
+              color: 'rgba(255, 255, 255, 0.5)',
+              cursor: 'pointer',
+            }}
+          >
+            {showDevDrawer ? '✕ Close Dev' : '⚙ Dev Test'}
+          </button>
+
+          {showDevDrawer && (
+            <div
+              style={{
+                position: 'absolute',
+                bottom: '36px',
+                right: '0',
+                width: '280px',
+                background: 'rgba(14, 16, 24, 0.95)',
+                backdropFilter: 'blur(20px)',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                borderRadius: '12px',
+                padding: '12px',
+                boxShadow: '0 12px 36px rgba(0, 0, 0, 0.6)',
+                fontSize: '11px',
+                color: '#d1d5db',
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: '8px', color: '#f3f4f6' }}>Dev Verification Controls</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => window.injectStaleCursor?.(1)}
+                  style={{
+                    padding: '4px 8px',
+                    background: 'rgba(245, 158, 11, 0.15)',
+                    border: '1px solid rgba(245, 158, 11, 0.4)',
+                    color: '#fbbf24',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  Inject Stale Cursor (seq: 1)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.injectStaleReaction?.(1)}
+                  style={{
+                    padding: '4px 8px',
+                    background: 'rgba(245, 158, 11, 0.15)',
+                    border: '1px solid rgba(245, 158, 11, 0.4)',
+                    color: '#fbbf24',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  Inject Stale Reaction (seq: 1)
+                </button>
+              </div>
+              <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '6px', color: '#9ca3af' }}>
+                <div>Stale packets dropped: <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>{discardedStaleCount}</strong></div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
