@@ -12,18 +12,13 @@ const WS_URL = 'ws://localhost:8080';
 const THROTTLE_INTERVAL_MS = 33;
 
 /**
- * Interpolation Window: 100ms
- *
- * Rationale:
- * 100ms is approximately 3x the 33ms send interval.
- * This 3-packet buffer absorbs typical network jitter, packet clustering, and frame pacing delays
- * without the cursor stalling or jumping.
- *
- * Trade-off:
- * Adds a deliberate ~100ms visual latency in exchange for 60fps/120fps continuous, buttery-smooth
- * linear interpolation without abrupt snapping.
+ * Interpolation Window: 100ms (~3x the 33ms send interval)
  */
 const INTERPOLATION_WINDOW_MS = 100;
+
+// Reconnection policy parameters (Phase 8: Bounded Exponential Backoff)
+const MAX_RECONNECT_ATTEMPTS = 5;
+const BASE_RECONNECT_DELAY_MS = 1000;
 
 // Curated reaction emoji options
 const REACTION_EMOJIS = ['🔥', '❤️', '🎉', '👏', '🚀'];
@@ -72,7 +67,8 @@ interface ActiveReaction {
 }
 
 export default function App() {
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error'>('connecting');
+  const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
   const [myInfo, setMyInfo] = useState<ClientInfo | null>(null);
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [remoteCursors, setRemoteCursors] = useState<Record<string, RemoteCursor>>({});
@@ -84,22 +80,17 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const myIdRef = useRef<string | null>(null);
   const cursorSeqRef = useRef<number>(0);
-
-  /**
-   * Separate sequence counters for cursor movements vs reactions:
-   * Cursor movement is high-frequency (~30Hz) continuous streaming where seq numbers are used to
-   * discard stale frames. Reactions are discrete user events. Separating them prevents continuous
-   * mouse tracking from inflating and desynchronizing the reaction sequence space.
-   */
   const reactionSeqRef = useRef<number>(0);
   const selectedEmojiRef = useRef<string>('🔥');
 
-  /**
-   * Phase 7: Per-client, per-message-type sequence trackers
-   * Tracks the highest applied sequence number for each sender to discard out-of-order arrivals.
-   */
+  // Phase 7: Per-client, per-message-type sequence trackers
   const lastAppliedCursorSeqRef = useRef<Map<string, number>>(new Map());
   const lastAppliedReactionSeqRef = useRef<Map<string, number>>(new Map());
+
+  // Phase 8: Reconnection state tracking
+  const reconnectAttemptsRef = useRef<number>(0);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isUnmountingRef = useRef<boolean>(false);
 
   // Throttling state references (outgoing)
   const lastSendTimeRef = useRef<number>(0);
@@ -131,14 +122,11 @@ export default function App() {
 
       for (const [id, interp] of interpolationsRef.current.entries()) {
         const elapsed = now - interp.startTime;
-        // Clamp progress strictly between 0 and 1
         const progress = Math.min(Math.max(elapsed / INTERPOLATION_WINDOW_MS, 0), 1);
 
-        // Calculate smooth interpolated coordinates using custom lerp
         interp.currX = lerp(interp.fromX, interp.toX, progress);
         interp.currY = lerp(interp.fromY, interp.toY, progress);
 
-        // Apply position directly to DOM element
         const el = cursorDomRefs.current.get(id);
         if (el) {
           el.style.transform = `translate3d(${interp.currX}px, ${interp.currY}px, 0)`;
@@ -155,231 +143,259 @@ export default function App() {
     };
   }, []);
 
+  /**
+   * Phase 8: Robust WebSocket Connection Lifecycle with Bounded Reconnect
+   */
   useEffect(() => {
-    console.log(`[ws] Connecting to ${WS_URL}...`);
-    const socket = new WebSocket(WS_URL);
-    socketRef.current = socket;
+    isUnmountingRef.current = false;
 
-    // Dev mode console tools
-    if (import.meta.env.DEV) {
-      window.socket = socket;
-      window.cursorwireSocket = socket;
-      window.sendRaw = (data: unknown) => {
-        if (socket.readyState !== WebSocket.OPEN) {
-          console.warn(`[test harness] Cannot send — socket not open (readyState: ${socket.readyState})`);
+    const connect = () => {
+      if (isUnmountingRef.current) return;
+
+      console.log(`[ws] Connecting to ${WS_URL}... (attempt ${reconnectAttemptsRef.current})`);
+      const socket = new WebSocket(WS_URL);
+      socketRef.current = socket;
+
+      // Dev mode console tools
+      if (import.meta.env.DEV) {
+        window.socket = socket;
+        window.cursorwireSocket = socket;
+        window.sendRaw = (data: unknown) => {
+          if (socket.readyState !== WebSocket.OPEN) {
+            console.warn(`[test harness] Cannot send — socket not open (readyState: ${socket.readyState})`);
+            return;
+          }
+          const payload = typeof data === 'string' ? data : JSON.stringify(data);
+          socket.send(payload);
+          console.log('[test harness] Sent message to server:', payload);
+        };
+
+        window.injectStaleCursor = (staleSeq = 1) => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          const msg: CursorMoveMessage = {
+            type: 'cursor-move',
+            x: 60,
+            y: 60,
+            seq: staleSeq,
+          };
+          socket.send(JSON.stringify(msg));
+          console.log(`[test harness] Injected stale cursor-move with seq: ${staleSeq} at (60, 60)`);
+        };
+
+        window.injectStaleReaction = (staleSeq = 1) => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          const msg: ReactionMessage = {
+            type: 'reaction',
+            x: 200,
+            y: 200,
+            emoji: '⚠️',
+            seq: staleSeq,
+          };
+          socket.send(JSON.stringify(msg));
+          console.log(`[test harness] Injected stale reaction with seq: ${staleSeq} at (200, 200)`);
+        };
+      }
+
+      socket.onopen = () => {
+        console.log('[ws] Connected to server');
+        setStatus('connected');
+        reconnectAttemptsRef.current = 0;
+        setReconnectAttempt(0);
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+      };
+
+      socket.onmessage = (event) => {
+        if (typeof event.data !== 'string') {
+          console.warn('[ws incoming error] Non-string frame received from server');
           return;
         }
-        const payload = typeof data === 'string' ? data : JSON.stringify(data);
-        socket.send(payload);
-        console.log('[test harness] Sent message to server:', payload);
-      };
 
-      // [DEV TEST HARNESS - Phase 7]
-      window.injectStaleCursor = (staleSeq = 1) => {
-        if (socket.readyState !== WebSocket.OPEN) return;
-        const msg: CursorMoveMessage = {
-          type: 'cursor-move',
-          x: 60,
-          y: 60,
-          seq: staleSeq,
-        };
-        socket.send(JSON.stringify(msg));
-        console.log(`[test harness] Injected stale cursor-move with seq: ${staleSeq} at (60, 60)`);
-      };
+        const result = parseAndValidateMessage(event.data);
+        if (!result.success) {
+          console.warn(`[ws incoming error] Message rejected: ${result.error}`, event.data);
+          return;
+        }
 
-      window.injectStaleReaction = (staleSeq = 1) => {
-        if (socket.readyState !== WebSocket.OPEN) return;
-        const msg: ReactionMessage = {
-          type: 'reaction',
-          x: 200,
-          y: 200,
-          emoji: '⚠️',
-          seq: staleSeq,
-        };
-        socket.send(JSON.stringify(msg));
-        console.log(`[test harness] Injected stale reaction with seq: ${staleSeq} at (200, 200)`);
-      };
-    }
+        const msg = result.data;
 
-    socket.onopen = () => {
-      console.log('[ws] Connected to server');
-      setStatus('connected');
-    };
+        switch (msg.type) {
+          case 'welcome':
+            console.log(`[ws] Welcomed as client ${msg.id} with color ${msg.color}`);
+            myIdRef.current = msg.id;
+            setMyInfo({ id: msg.id, color: msg.color });
+            break;
 
-    socket.onmessage = (event) => {
-      if (typeof event.data !== 'string') {
-        console.warn('[ws incoming error] Non-string frame received from server');
-        return;
-      }
+          case 'presence-update': {
+            setClients(msg.clients);
+            const activeIds = new Set(msg.clients.map((c) => c.id));
 
-      const result = parseAndValidateMessage(event.data);
-      if (!result.success) {
-        console.warn(`[ws incoming error] Message rejected: ${result.error}`, event.data);
-        return;
-      }
-
-      const msg = result.data;
-
-      switch (msg.type) {
-        case 'welcome':
-          console.log(`[ws] Welcomed as client ${msg.id} with color ${msg.color}`);
-          myIdRef.current = msg.id;
-          setMyInfo({ id: msg.id, color: msg.color });
-          break;
-
-        case 'presence-update': {
-          setClients(msg.clients);
-          const activeIds = new Set(msg.clients.map((c) => c.id));
-
-          // Cleanup interpolation state & sequence trackers for disconnected clients
-          for (const id of Array.from(interpolationsRef.current.keys())) {
-            if (!activeIds.has(id)) {
-              interpolationsRef.current.delete(id);
-              cursorDomRefs.current.delete(id);
-              lastAppliedCursorSeqRef.current.delete(id);
-              lastAppliedReactionSeqRef.current.delete(id);
-            }
-          }
-
-          // Cleanup React state
-          setRemoteCursors((prev) => {
-            const next = { ...prev };
-            let changed = false;
-            for (const id of Object.keys(next)) {
+            // Cleanup interpolation state & sequence trackers for disconnected clients
+            for (const id of Array.from(interpolationsRef.current.keys())) {
               if (!activeIds.has(id)) {
-                delete next[id];
-                changed = true;
+                interpolationsRef.current.delete(id);
+                cursorDomRefs.current.delete(id);
+                lastAppliedCursorSeqRef.current.delete(id);
+                lastAppliedReactionSeqRef.current.delete(id);
               }
             }
-            return changed ? next : prev;
-          });
-          break;
-        }
 
-        case 'cursor-move': {
-          if (!msg.id || msg.id === myIdRef.current) break;
-
-          /**
-           * Phase 7 Ordering Guard:
-           * Discard update if sequence number is less than or equal to the last applied sequence.
-           */
-          const lastSeq = lastAppliedCursorSeqRef.current.get(msg.id) ?? -1;
-          if (msg.seq <= lastSeq) {
-            console.warn(
-              `[ordering] Discarded stale cursor-move from ${msg.id} (seq: ${msg.seq} <= last: ${lastSeq})`
-            );
-            setDiscardedStaleCount((prev) => prev + 1);
+            // Cleanup React state
+            setRemoteCursors((prev) => {
+              const next = { ...prev };
+              let changed = false;
+              for (const id of Object.keys(next)) {
+                if (!activeIds.has(id)) {
+                  delete next[id];
+                  changed = true;
+                }
+              }
+              return changed ? next : prev;
+            });
             break;
           }
 
-          // Monotonic progress: update tracker to highest sequence
-          lastAppliedCursorSeqRef.current.set(msg.id, msg.seq);
+          case 'cursor-move': {
+            if (!msg.id || msg.id === myIdRef.current) break;
 
-          const now = performance.now();
-          const existing = interpolationsRef.current.get(msg.id);
+            // Phase 7: Discard stale or out-of-order cursor updates
+            const lastSeq = lastAppliedCursorSeqRef.current.get(msg.id) ?? -1;
+            if (msg.seq <= lastSeq) {
+              console.warn(
+                `[ordering] Discarded stale cursor-move from ${msg.id} (seq: ${msg.seq} <= last: ${lastSeq})`
+              );
+              setDiscardedStaleCount((prev) => prev + 1);
+              break;
+            }
 
-          if (!existing) {
-            // First position received for this remote client
-            interpolationsRef.current.set(msg.id, {
-              fromX: msg.x,
-              fromY: msg.y,
-              toX: msg.x,
-              toY: msg.y,
-              currX: msg.x,
-              currY: msg.y,
-              startTime: now,
-            });
-          } else {
-            // Smooth transition:
-            // Ease from current visible interpolated position to the newly received target
-            existing.fromX = existing.currX;
-            existing.fromY = existing.currY;
-            existing.toX = msg.x;
-            existing.toY = msg.y;
-            existing.startTime = now;
+            lastAppliedCursorSeqRef.current.set(msg.id, msg.seq);
+
+            const now = performance.now();
+            const existing = interpolationsRef.current.get(msg.id);
+
+            if (!existing) {
+              interpolationsRef.current.set(msg.id, {
+                fromX: msg.x,
+                fromY: msg.y,
+                toX: msg.x,
+                toY: msg.y,
+                currX: msg.x,
+                currY: msg.y,
+                startTime: now,
+              });
+            } else {
+              existing.fromX = existing.currX;
+              existing.fromY = existing.currY;
+              existing.toX = msg.x;
+              existing.toY = msg.y;
+              existing.startTime = now;
+            }
+
+            setRemoteCursors((prev) => ({
+              ...prev,
+              [msg.id!]: {
+                id: msg.id!,
+                x: msg.x,
+                y: msg.y,
+                seq: msg.seq,
+              },
+            }));
+            break;
           }
 
-          // Keep React state in sync for DevTools and UI coordinate indicators
-          setRemoteCursors((prev) => ({
-            ...prev,
-            [msg.id!]: {
-              id: msg.id!,
+          case 'reaction': {
+            const senderId = msg.id || 'unknown';
+
+            // Phase 7: Discard stale or out-of-order reactions
+            const lastSeq = lastAppliedReactionSeqRef.current.get(senderId) ?? -1;
+            if (msg.seq <= lastSeq) {
+              console.warn(
+                `[ordering] Discarded stale reaction from ${senderId} (seq: ${msg.seq} <= last: ${lastSeq})`
+              );
+              setDiscardedStaleCount((prev) => prev + 1);
+              break;
+            }
+
+            lastAppliedReactionSeqRef.current.set(senderId, msg.seq);
+
+            console.log(`[reaction received] From ${senderId}: ${msg.emoji} at (${msg.x}, ${msg.y}) (seq: ${msg.seq})`);
+            const newReaction: ActiveReaction = {
+              key: `${senderId}-${msg.seq}-${Date.now()}-${Math.random()}`,
+              id: senderId,
               x: msg.x,
               y: msg.y,
-              seq: msg.seq,
-            },
-          }));
-          break;
-        }
+              emoji: msg.emoji,
+            };
 
-        case 'reaction': {
-          const senderId = msg.id || 'unknown';
+            setReactions((prev) => [...prev, newReaction]);
 
-          /**
-           * Phase 7 Ordering Guard:
-           * Discard reaction if sequence number is less than or equal to the last applied sequence.
-           */
-          const lastSeq = lastAppliedReactionSeqRef.current.get(senderId) ?? -1;
-          if (msg.seq <= lastSeq) {
-            console.warn(
-              `[ordering] Discarded stale reaction from ${senderId} (seq: ${msg.seq} <= last: ${lastSeq})`
-            );
-            setDiscardedStaleCount((prev) => prev + 1);
+            setTimeout(() => {
+              setReactions((prev) => prev.filter((r) => r.key !== newReaction.key));
+            }, 900);
             break;
           }
 
-          // Monotonic progress: update tracker to highest sequence
-          lastAppliedReactionSeqRef.current.set(senderId, msg.seq);
+          case 'error':
+            console.warn('[ws] Server reported protocol error:', msg.message, msg.reason);
+            break;
 
-          console.log(`[reaction received] From ${senderId}: ${msg.emoji} at (${msg.x}, ${msg.y}) (seq: ${msg.seq})`);
-          const newReaction: ActiveReaction = {
-            key: `${senderId}-${msg.seq}-${Date.now()}-${Math.random()}`,
-            id: senderId,
-            x: msg.x,
-            y: msg.y,
-            emoji: msg.emoji,
-          };
+          default:
+            break;
+        }
+      };
 
-          setReactions((prev) => [...prev, newReaction]);
+      socket.onclose = (event) => {
+        console.log(`[ws] Disconnected from server (code: ${event.code}, clean: ${event.wasClean})`);
+        myIdRef.current = null;
+        setMyInfo(null);
+        setClients([]);
+        setRemoteCursors({});
+        setReactions([]);
+        interpolationsRef.current.clear();
+        cursorDomRefs.current.clear();
+        lastAppliedCursorSeqRef.current.clear();
+        lastAppliedReactionSeqRef.current.clear();
 
-          // Automatically clean up this reaction after animation completes (~900ms)
-          setTimeout(() => {
-            setReactions((prev) => prev.filter((r) => r.key !== newReaction.key));
-          }, 900);
-          break;
+        // If unmounting intentionally (e.g. user navigated away), do not reconnect
+        if (isUnmountingRef.current) {
+          setStatus('disconnected');
+          return;
         }
 
-        case 'error':
-          console.warn('[ws] Server reported protocol error:', msg.message, msg.reason);
-          break;
+        // Phase 8: Bounded Exponential Backoff Reconnection
+        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttemptsRef.current += 1;
+          setReconnectAttempt(reconnectAttemptsRef.current);
+          setStatus('reconnecting');
 
-        default:
-          break;
-      }
+          const delay = Math.min(
+            BASE_RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttemptsRef.current - 1),
+            6000
+          );
+          console.log(
+            `[ws reconnect] Reconnect attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS} scheduled in ${Math.round(delay)}ms`
+          );
+          reconnectTimeoutRef.current = setTimeout(connect, delay);
+        } else {
+          console.warn(
+            `[ws reconnect] Maximum reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Ceasing retries.`
+          );
+          setStatus('disconnected');
+        }
+      };
+
+      socket.onerror = (error) => {
+        console.error('[ws] Socket error observed:', error);
+      };
     };
 
-    socket.onclose = (event) => {
-      console.log(`[ws] Disconnected from server (code: ${event.code}, clean: ${event.wasClean})`);
-      setStatus('disconnected');
-      myIdRef.current = null;
-      setMyInfo(null);
-      setClients([]);
-      setRemoteCursors({});
-      setReactions([]);
-      interpolationsRef.current.clear();
-      cursorDomRefs.current.clear();
-      lastAppliedCursorSeqRef.current.clear();
-      lastAppliedReactionSeqRef.current.clear();
-    };
-
-    socket.onerror = (error) => {
-      console.error('[ws] Socket error observed:', error);
-      setStatus('error');
-    };
+    connect();
 
     // Helper to transmit cursor position to server
     const transmitCursor = (x: number, y: number) => {
-      if (socket.readyState !== WebSocket.OPEN) return;
+      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
       cursorSeqRef.current += 1;
       const msg: CursorMoveMessage = {
@@ -388,14 +404,12 @@ export default function App() {
         y,
         seq: cursorSeqRef.current,
       };
-      socket.send(JSON.stringify(msg));
+      socketRef.current.send(JSON.stringify(msg));
       lastSendTimeRef.current = performance.now();
     };
 
     /**
      * Mousemove handler with strict ~30Hz (33ms) throttling.
-     * Combines immediate leading-edge transmission with trailing-edge delivery
-     * so that the final resting position of the mouse is never lost.
      */
     const handleMouseMove = (e: MouseEvent) => {
       const x = Math.round(e.clientX);
@@ -427,7 +441,6 @@ export default function App() {
 
     /**
      * Click handler to emit reaction burst.
-     * Ignores clicks on interactive UI controls (buttons, inputs, links).
      */
     const handleCanvasClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
@@ -435,7 +448,7 @@ export default function App() {
         return;
       }
 
-      if (socket.readyState !== WebSocket.OPEN) return;
+      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
 
       reactionSeqRef.current += 1;
       const reactionMsg: ReactionMessage = {
@@ -446,29 +459,49 @@ export default function App() {
         seq: reactionSeqRef.current,
       };
       console.log(`[reaction emit] Sending ${reactionMsg.emoji} at (${reactionMsg.x}, ${reactionMsg.y}) (seq: ${reactionMsg.seq})`);
-      socket.send(JSON.stringify(reactionMsg));
+      socketRef.current.send(JSON.stringify(reactionMsg));
     };
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('click', handleCanvasClick);
 
     return () => {
+      isUnmountingRef.current = true;
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('click', handleCanvasClick);
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
       if (throttleTimerRef.current) {
         clearTimeout(throttleTimerRef.current);
         throttleTimerRef.current = null;
       }
-      if (window.socket === socket) {
+      if (window.socket === socketRef.current) {
         delete window.socket;
         delete window.cursorwireSocket;
         delete window.sendRaw;
         delete window.injectStaleCursor;
         delete window.injectStaleReaction;
       }
-      socket.close();
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
     };
   }, []);
+
+  const manualReconnect = () => {
+    reconnectAttemptsRef.current = 0;
+    setReconnectAttempt(0);
+    setStatus('connecting');
+    if (socketRef.current) {
+      socketRef.current.close();
+    }
+    // Trigger immediate reconnect
+    const socket = new WebSocket(WS_URL);
+    socketRef.current = socket;
+  };
 
   const clientColorMap = new Map<string, string>(clients.map((c) => [c.id, c.color]));
 
@@ -525,7 +558,7 @@ export default function App() {
               transform: `translate3d(${cursor.x}px, ${cursor.y}px, 0)`,
               pointerEvents: 'none',
               zIndex: 9999,
-              transition: 'none', // Strictly no CSS transition shortcut — driven by custom rAF lerp!
+              transition: 'none',
               willChange: 'transform',
             }}
           >
@@ -579,8 +612,43 @@ export default function App() {
       <div style={{ maxWidth: '640px' }}>
         <header style={{ marginBottom: '1.5rem', borderBottom: '1px solid #e5e7eb', paddingBottom: '1rem' }}>
           <h1 style={{ margin: '0 0 0.25rem' }}>cursorwire</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.95rem' }}>
-            <span>Status: <strong style={{ color: status === 'connected' ? '#10b981' : '#ef4444' }}>{status}</strong></span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.95rem', flexWrap: 'wrap' }}>
+            <span>
+              Status:{' '}
+              <strong
+                style={{
+                  color:
+                    status === 'connected'
+                      ? '#10b981'
+                      : status === 'reconnecting'
+                      ? '#f59e0b'
+                      : '#ef4444',
+                }}
+              >
+                {status === 'reconnecting'
+                  ? `reconnecting (attempt ${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})...`
+                  : status}
+              </strong>
+            </span>
+
+            {status === 'disconnected' && (
+              <button
+                type="button"
+                onClick={manualReconnect}
+                style={{
+                  padding: '2px 8px',
+                  background: '#3b82f6',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '0.8rem',
+                }}
+              >
+                Reconnect Now
+              </button>
+            )}
+
             {myInfo && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
                 • You:
@@ -591,7 +659,7 @@ export default function App() {
           </div>
         </header>
 
-        {/* Phase 6 Reaction Selector Toolbar */}
+        {/* Reaction Selector Toolbar */}
         <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff', marginBottom: '1.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
             <div>
@@ -624,10 +692,13 @@ export default function App() {
           </div>
         </section>
 
+        {/* Presence List */}
         <section style={{ padding: '1.25rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#f9fafb', marginBottom: '1.5rem' }}>
           <h3 style={{ margin: '0 0 0.75rem' }}>Active Room Presence ({clients.length})</h3>
           {clients.length === 0 ? (
-            <p style={{ margin: 0, color: '#6b7280', fontSize: '0.9rem' }}>Connecting to room...</p>
+            <p style={{ margin: 0, color: '#6b7280', fontSize: '0.9rem' }}>
+              {status === 'connected' ? 'No other clients in room.' : 'Connecting to room...'}
+            </p>
           ) : (
             <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
               {clients.map((client) => {
@@ -673,57 +744,18 @@ export default function App() {
           )}
         </section>
 
-        {/* [DEV TEST HARNESS - Phase 7] Ordering Verification */}
-        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff', marginBottom: '1.5rem' }}>
-          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 7: Sequence Ordering & Stale Discarding</h4>
-          <p style={{ margin: '0 0 0.75rem', fontSize: '0.85rem', color: '#4b5563' }}>
-            Updates with sequence numbers ≤ last applied sequence are discarded to prevent out-of-order jitter. Test via buttons below or console (<code>window.injectStaleCursor()</code>):
+        {/* Phase 8 Reconnect Policy & Phase 7 Ordering Status */}
+        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff' }}>
+          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 8: Heartbeat & Reconnection Policy</h4>
+          <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem', color: '#4b5563' }}>
+            Server transmits <strong>ping/pong heartbeats every 10s</strong>. Unresponsive connections are terminated after ~20s. On disconnect, clients auto-reconnect with <strong>exponential backoff (up to 5 attempts)</strong> and obtain a clean identity without ghost cursors.
           </p>
 
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-            <button
-              type="button"
-              onClick={() => {
-                if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-                // Artificially inject stale cursor-move with sequence number 1
-                const staleCursor: CursorMoveMessage = {
-                  type: 'cursor-move',
-                  x: 60,
-                  y: 60,
-                  seq: 1,
-                };
-                socketRef.current.send(JSON.stringify(staleCursor));
-                console.log('[test harness] Sent artificially stale cursor-move (seq: 1) to server');
-              }}
-              style={{ padding: '0.4rem 0.7rem', cursor: 'pointer', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.85rem' }}
-            >
-              Inject Stale Cursor (seq: 1)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-                // Artificially inject stale reaction with sequence number 1
-                const staleReaction: ReactionMessage = {
-                  type: 'reaction',
-                  x: 200,
-                  y: 200,
-                  emoji: '⚠️',
-                  seq: 1,
-                };
-                socketRef.current.send(JSON.stringify(staleReaction));
-                console.log('[test harness] Sent artificially stale reaction (seq: 1) to server');
-              }}
-              style={{ padding: '0.4rem 0.7rem', cursor: 'pointer', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '0.85rem' }}
-            >
-              Inject Stale Reaction (seq: 1)
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: '#6b7280', flexWrap: 'wrap' }}>
-            <div>Outgoing cursor seq: <strong>{cursorSeqRef.current}</strong></div>
-            <div>Outgoing reaction seq: <strong>{reactionSeqRef.current}</strong></div>
-            <div>Stale packets discarded locally: <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>{discardedStaleCount}</strong></div>
+          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: '#6b7280', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+            <div>Cursor seq: <strong>{cursorSeqRef.current}</strong></div>
+            <div>Reaction seq: <strong>{reactionSeqRef.current}</strong></div>
+            <div>Stale discarded: <strong style={{ color: discardedStaleCount > 0 ? '#ef4444' : '#10b981' }}>{discardedStaleCount}</strong></div>
+            <div>Reconnect attempts: <strong>{reconnectAttempt}/{MAX_RECONNECT_ATTEMPTS}</strong></div>
           </div>
         </section>
       </div>

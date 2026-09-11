@@ -27,6 +27,7 @@ interface ClientSession {
   id: string;
   color: string;
   socket: WebSocket;
+  isAlive: boolean;
 }
 
 // In-memory registry of active client connections: clientId -> ClientSession
@@ -94,6 +95,40 @@ const wss = new WebSocketServer({ port: PORT }, () => {
   console.log(`Server listening on ws://localhost:${PORT}`);
 });
 
+/**
+ * Heartbeat Ping-Pong Detection (Phase 8: Dead Connection Detection)
+ *
+ * Interval: Every 10s.
+ * Mechanism:
+ *  - Under RFC 6455, WebSocket control frames (0x9 Ping, 0xA Pong) operate at the transport layer.
+ *  - The server emits a ping() frame. The client browser automatically replies with a pong frame.
+ *  - If a connection loses network connectivity abruptly (e.g. WiFi turned off, machine sleep, crash)
+ *    without a clean TCP FIN/RST packet, ws.on('close') is never triggered by the OS.
+ *  - If isAlive remains false across 2 consecutive heartbeat intervals (~20s), the socket is deemed dead.
+ *  - The server terminates the connection, purges the client from memory, and updates presence.
+ */
+const HEARTBEAT_INTERVAL_MS = 10000;
+
+const heartbeatInterval = setInterval(() => {
+  for (const [clientId, session] of clients.entries()) {
+    if (!session.isAlive) {
+      console.warn(`[heartbeat timeout] Client ${clientId} is unresponsive (dead connection). Terminating socket.`);
+      clients.delete(clientId);
+      session.socket.terminate(); // Hard-close the dead socket immediately
+      broadcastPresence();
+      continue;
+    }
+
+    // Mark as unconfirmed and issue a ping control frame
+    session.isAlive = false;
+    session.socket.ping();
+  }
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on('close', () => {
+  clearInterval(heartbeatInterval);
+});
+
 wss.on('connection', (ws) => {
   // Generate short unique client ID and assign distinct color
   const clientId = crypto.randomUUID().slice(0, 8);
@@ -103,10 +138,16 @@ wss.on('connection', (ws) => {
     id: clientId,
     color,
     socket: ws,
+    isAlive: true,
   };
   clients.set(clientId, session);
 
   console.log(`[connect] Client ${clientId} connected (${color}). Active clients: ${clients.size}`);
+
+  // Register pong handler to reset liveness flag
+  ws.on('pong', () => {
+    session.isAlive = true;
+  });
 
   // 1. Send personal welcome message to the joining client
   const welcomeMsg: WelcomeMessage = {
