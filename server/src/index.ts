@@ -164,6 +164,21 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // Phase 6: Broadcast reactions to ALL clients INCLUDING the sender
+    if (message.type === 'reaction') {
+      // Design decision: Reactions are discrete events where the sender expects immediate visual confirmation
+      // from the server at the same logical instant as other participants.
+      broadcast({
+        type: 'reaction',
+        id: clientId,
+        x: message.x,
+        y: message.y,
+        emoji: message.emoji,
+        seq: message.seq,
+      }); // Notice: No excludeId — sender also receives the broadcast
+      return;
+    }
+
     console.log(`[message accepted] Client ${clientId} ->`, message);
   });
 

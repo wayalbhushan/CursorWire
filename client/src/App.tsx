@@ -3,6 +3,7 @@ import {
   parseAndValidateMessage,
   type ClientInfo,
   type CursorMoveMessage,
+  type ReactionMessage,
 } from '../../shared/protocol.js';
 
 const WS_URL = 'ws://localhost:8080';
@@ -15,14 +16,17 @@ const THROTTLE_INTERVAL_MS = 33;
  *
  * Rationale:
  * 100ms is approximately 3x the 33ms send interval.
- * This 3-packet time buffer absorbs typical network jitter, packet clustering, and frame pacing delays
+ * This 3-packet buffer absorbs typical network jitter, packet clustering, and frame pacing delays
  * without the cursor stalling or jumping.
  *
  * Trade-off:
- * Adds a deliberate ~100ms visual latency (rendering where the user was ~100ms ago) in exchange for
- * 60fps/120fps continuous, buttery-smooth linear interpolation without abrupt snapping.
+ * Adds a deliberate ~100ms visual latency in exchange for 60fps/120fps continuous, buttery-smooth
+ * linear interpolation without abrupt snapping.
  */
 const INTERPOLATION_WINDOW_MS = 100;
+
+// Curated reaction emoji options
+const REACTION_EMOJIS = ['🔥', '❤️', '🎉', '👏', '🚀'];
 
 /**
  * Custom linear interpolation (LERP) function:
@@ -57,16 +61,35 @@ interface CursorInterpolationState {
   startTime: number;
 }
 
+interface ActiveReaction {
+  key: string;
+  id: string;
+  x: number;
+  y: number;
+  emoji: string;
+}
+
 export default function App() {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting');
   const [myInfo, setMyInfo] = useState<ClientInfo | null>(null);
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [remoteCursors, setRemoteCursors] = useState<Record<string, RemoteCursor>>({});
+  const [reactions, setReactions] = useState<ActiveReaction[]>([]);
+  const [selectedEmoji, setSelectedEmoji] = useState<string>('🔥');
 
   // References for socket, client id, and sequence numbers
   const socketRef = useRef<WebSocket | null>(null);
   const myIdRef = useRef<string | null>(null);
-  const seqRef = useRef<number>(0);
+  const cursorSeqRef = useRef<number>(0);
+
+  /**
+   * Separate sequence counters for cursor movements vs reactions:
+   * Cursor movement is high-frequency (~30Hz) continuous streaming where seq numbers are used to
+   * discard stale frames. Reactions are discrete user events. Separating them prevents continuous
+   * mouse tracking from inflating and desynchronizing the reaction sequence space.
+   */
+  const reactionSeqRef = useRef<number>(0);
+  const selectedEmojiRef = useRef<string>('🔥');
 
   // Throttling state references (outgoing)
   const lastSendTimeRef = useRef<number>(0);
@@ -80,6 +103,10 @@ export default function App() {
   useEffect(() => {
     myIdRef.current = myInfo?.id ?? null;
   }, [myInfo]);
+
+  useEffect(() => {
+    selectedEmojiRef.current = selectedEmoji;
+  }, [selectedEmoji]);
 
   /**
    * Shared requestAnimationFrame Render Loop for Remote Cursors
@@ -231,6 +258,25 @@ export default function App() {
           break;
         }
 
+        case 'reaction': {
+          // Phase 6: Render incoming reaction burst (including our own echoed reaction)
+          const newReaction: ActiveReaction = {
+            key: `${msg.id || 'anon'}-${msg.seq}-${Date.now()}-${Math.random()}`,
+            id: msg.id || 'unknown',
+            x: msg.x,
+            y: msg.y,
+            emoji: msg.emoji,
+          };
+
+          setReactions((prev) => [...prev, newReaction]);
+
+          // Automatically clean up this reaction after animation completes (~900ms)
+          setTimeout(() => {
+            setReactions((prev) => prev.filter((r) => r.key !== newReaction.key));
+          }, 900);
+          break;
+        }
+
         case 'error':
           console.warn('[ws] Server reported protocol error:', msg.message, msg.reason);
           break;
@@ -247,6 +293,7 @@ export default function App() {
       setMyInfo(null);
       setClients([]);
       setRemoteCursors({});
+      setReactions([]);
       interpolationsRef.current.clear();
       cursorDomRefs.current.clear();
     };
@@ -260,12 +307,12 @@ export default function App() {
     const transmitCursor = (x: number, y: number) => {
       if (socket.readyState !== WebSocket.OPEN) return;
 
-      seqRef.current += 1;
+      cursorSeqRef.current += 1;
       const msg: CursorMoveMessage = {
         type: 'cursor-move',
         x,
         y,
-        seq: seqRef.current,
+        seq: cursorSeqRef.current,
       };
       socket.send(JSON.stringify(msg));
       lastSendTimeRef.current = performance.now();
@@ -304,10 +351,35 @@ export default function App() {
       }
     };
 
+    /**
+     * Click handler to emit reaction burst.
+     * Ignores clicks on interactive UI controls (buttons, inputs, links).
+     */
+    const handleCanvasClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest('button, a, input, select, textarea, [role="button"]')) {
+        return;
+      }
+
+      if (socket.readyState !== WebSocket.OPEN) return;
+
+      reactionSeqRef.current += 1;
+      const reactionMsg: ReactionMessage = {
+        type: 'reaction',
+        x: Math.round(e.clientX),
+        y: Math.round(e.clientY),
+        emoji: selectedEmojiRef.current,
+        seq: reactionSeqRef.current,
+      };
+      socket.send(JSON.stringify(reactionMsg));
+    };
+
     window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('click', handleCanvasClick);
 
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('click', handleCanvasClick);
       if (throttleTimerRef.current) {
         clearTimeout(throttleTimerRef.current);
         throttleTimerRef.current = null;
@@ -336,6 +408,26 @@ export default function App() {
         overflow: 'hidden',
       }}
     >
+      {/* Active Reactions Layer (Discrete CSS Keyframe Bursts) */}
+      {reactions.map((r) => (
+        <div
+          key={r.key}
+          style={{
+            position: 'fixed',
+            left: `${r.x}px`,
+            top: `${r.y}px`,
+            pointerEvents: 'none',
+            zIndex: 10000,
+            fontSize: '32px',
+            animation: 'emojiBurst 900ms cubic-bezier(0.16, 1, 0.3, 1) forwards',
+            filter: 'drop-shadow(0 4px 10px rgba(0,0,0,0.3))',
+            userSelect: 'none',
+          }}
+        >
+          {r.emoji}
+        </div>
+      ))}
+
       {/* Remote Cursors Layer (Smooth custom LERP driven by requestAnimationFrame) */}
       {Object.values(remoteCursors).map((cursor) => {
         const color = clientColorMap.get(cursor.id) || '#3b82f6';
@@ -422,6 +514,39 @@ export default function App() {
           </div>
         </header>
 
+        {/* Phase 6 Reaction Selector Toolbar */}
+        <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
+            <div>
+              <h4 style={{ margin: '0 0 0.25rem', fontSize: '0.95rem' }}>Tap-to-Emit Reaction</h4>
+              <p style={{ margin: 0, fontSize: '0.85rem', color: '#6b7280' }}>
+                Click anywhere on the screen to burst your reaction to everyone!
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+              {REACTION_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  onClick={() => setSelectedEmoji(emoji)}
+                  style={{
+                    fontSize: '1.25rem',
+                    padding: '0.35rem 0.55rem',
+                    borderRadius: '6px',
+                    border: selectedEmoji === emoji ? '2px solid #3b82f6' : '1px solid #e5e7eb',
+                    background: selectedEmoji === emoji ? '#eff6ff' : '#ffffff',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  title={`Select ${emoji}`}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
         <section style={{ padding: '1.25rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#f9fafb', marginBottom: '1.5rem' }}>
           <h3 style={{ margin: '0 0 0.75rem' }}>Active Room Presence ({clients.length})</h3>
           {clients.length === 0 ? (
@@ -472,13 +597,14 @@ export default function App() {
         </section>
 
         <section style={{ padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '8px', background: '#ffffff' }}>
-          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 5: Linear Interpolation (rAF LERP) Active</h4>
+          <h4 style={{ margin: '0 0 0.5rem' }}>Phase 6: Multi-client Emoji Bursts Active</h4>
           <p style={{ margin: '0 0 0.5rem', fontSize: '0.85rem', color: '#4b5563' }}>
-            Remote cursors are smoothed across a <strong>100ms window</strong> using custom <code>lerp</code> calculations inside a single <code>requestAnimationFrame</code> loop. CSS transitions remain strictly disabled.
+            Clicking emits an animated emoji burst broadcast to all clients (including sender). Each burst animates and cleans up independently over 900ms without affecting cursor interpolation.
           </p>
-          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: '#6b7280' }}>
-            <div>Outgoing seq: <strong>{seqRef.current}</strong></div>
-            <div>Interpolation window: <strong>100ms (~3x send interval)</strong></div>
+          <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: '#6b7280', flexWrap: 'wrap' }}>
+            <div>Cursor seq: <strong>{cursorSeqRef.current}</strong></div>
+            <div>Reaction seq: <strong>{reactionSeqRef.current}</strong></div>
+            <div>Active reactions: <strong>{reactions.length}</strong></div>
           </div>
         </section>
       </div>
