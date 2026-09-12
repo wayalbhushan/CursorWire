@@ -39,13 +39,10 @@ Vite will start the client at `http://localhost:5173`.
 
 ---
 
-## 3. Live Demo & Render Cold Starts
+## 3. Live Demo 
 
 - **Production Client (Vercel):** [https://cursor-wire.vercel.app/](https://cursor-wire.vercel.app/)
 - **Production Server (Render):** `wss://cursorwire-server.onrender.com`
-
-**Note on Render Free-Tier Cold Starts:**  
-Render spins down free-tier web services after 15 minutes of inactivity. If no requests have arrived recently, the server can take 30 to 60 seconds to boot on the initial connection. During this wake-up window, the client status bar will show `RECONNECTING (X/5)` until the socket opens. An automated HTTP ping hits `https://cursorwire-server.onrender.com/health` periodically to reduce idle spin-downs, but cold starts remain a factor when the service is completely dormant.
 
 ---
 
