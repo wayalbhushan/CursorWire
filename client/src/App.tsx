@@ -10,7 +10,7 @@ import {
   type ReactionMessage,
 } from '../../server/src/protocol.js';
 
-const WS_URL = 'ws://localhost:8080';
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
 const THROTTLE_INTERVAL_MS = 33; // ~30Hz mouse transmission
 const REACTION_EMOJIS = ['🔥', '❤️', '🎉', '👏', '🚀'];
 
@@ -591,7 +591,9 @@ export default function App() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span>PORT: 8080 (WS)</span>
+          <span>
+            {WS_URL.startsWith('wss') ? 'WSS' : 'WS'}: {WS_URL.replace(/^wss?:\/\//, '')}
+          </span>
           <span style={{ color: '#272c38' }}>|</span>
           <span>RATE: 30HZ THROTTLED</span>
           <span style={{ color: '#272c38' }}>|</span>

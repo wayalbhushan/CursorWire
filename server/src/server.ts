@@ -1,3 +1,4 @@
+import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
 import {
@@ -11,8 +12,28 @@ const PORT = Number(process.env.PORT) || 8080;
 
 const room = new Room();
 
-const wss = new WebSocketServer({ port: PORT }, () => {
-  console.log(`[server] CursorWire WebSocket server listening on ws://localhost:${PORT}`);
+// HTTP server handling health checks (for Render / uptime pings) and WebSocket upgrades
+const server = http.createServer((req, res) => {
+  if (req.url === '/' || req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        status: 'ok',
+        service: 'cursorwire-server',
+        clients: room.getClientCount(),
+        uptime: Math.floor(process.uptime()),
+      })
+    );
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ server });
+
+server.listen(PORT, () => {
+  console.log(`[server] CursorWire server listening on port ${PORT}`);
 });
 
 /**
@@ -153,14 +174,15 @@ wss.on('error', (error) => {
 });
 
 // Graceful shutdown handling
-process.on('SIGINT', () => {
+const gracefulShutdown = () => {
   console.log('\n[shutdown] Gracefully terminating server...');
   clearInterval(heartbeatInterval);
-  wss.close(() => process.exit(0));
-});
+  wss.close(() => {
+    server.close(() => {
+      process.exit(0);
+    });
+  });
+};
 
-process.on('SIGTERM', () => {
-  console.log('\n[shutdown] Received SIGTERM, terminating...');
-  clearInterval(heartbeatInterval);
-  wss.close(() => process.exit(0));
-});
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);

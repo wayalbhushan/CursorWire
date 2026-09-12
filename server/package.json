@@ -13,12 +13,12 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
     "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
-    "@types/ws": "^8.18.1",
-    "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "@types/ws": "^8.18.1"
   }
 }
