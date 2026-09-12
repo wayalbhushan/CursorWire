@@ -1,35 +1,18 @@
 import { useEffect, useState, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import { CursorWireConnection, type ConnectionStatus } from './connection.js';
+import { CursorInterpolationManager } from './interpolation.js';
+import { RemoteCursorView, ReactionBurstView, injectGlobalStyles } from './render.js';
 import {
-  parseAndValidateMessage,
   type ClientInfo,
+  type CursorSnapshot,
   type CursorMoveMessage,
   type ReactionMessage,
-} from '../../shared/protocol.js';
+} from '../../server/src/protocol.js';
 
 const WS_URL = 'ws://localhost:8080';
-
-// Throttle interval for outgoing mousemove: ~30Hz (approx 33.3ms between messages)
-const THROTTLE_INTERVAL_MS = 33;
-
-/**
- * Interpolation Window: 100ms (~3x the 33ms send interval)
- */
-const INTERPOLATION_WINDOW_MS = 100;
-
-// Reconnection policy parameters (Phase 8: Bounded Exponential Backoff)
-const MAX_RECONNECT_ATTEMPTS = 5;
-const BASE_RECONNECT_DELAY_MS = 1000;
-
-// Curated reaction emoji options
+const THROTTLE_INTERVAL_MS = 33; // ~30Hz mouse transmission
 const REACTION_EMOJIS = ['🔥', '❤️', '🎉', '👏', '🚀'];
-
-/**
- * Custom linear interpolation (LERP) function:
- * Computes position between start and end based on normalized progress t ∈ [0, 1].
- */
-function lerp(start: number, end: number, t: number): number {
-  return start + (end - start) * t;
-}
 
 declare global {
   interface Window {
@@ -41,23 +24,6 @@ declare global {
   }
 }
 
-interface RemoteCursor {
-  id: string;
-  x: number;
-  y: number;
-  seq: number;
-}
-
-interface CursorInterpolationState {
-  fromX: number;
-  fromY: number;
-  toX: number;
-  toY: number;
-  currX: number;
-  currY: number;
-  startTime: number;
-}
-
 interface ActiveReaction {
   key: string;
   id: string;
@@ -67,11 +33,11 @@ interface ActiveReaction {
 }
 
 export default function App() {
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'error'>('connecting');
+  const [status, setStatus] = useState<ConnectionStatus>('connecting');
   const [reconnectAttempt, setReconnectAttempt] = useState<number>(0);
   const [myInfo, setMyInfo] = useState<ClientInfo | null>(null);
   const [clients, setClients] = useState<ClientInfo[]>([]);
-  const [remoteCursors, setRemoteCursors] = useState<Record<string, RemoteCursor>>({});
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, { id: string; x: number; y: number }>>({});
   const [reactions, setReactions] = useState<ActiveReaction[]>([]);
   const [selectedEmoji, setSelectedEmoji] = useState<string>('🔥');
   const [discardedStaleCount, setDiscardedStaleCount] = useState<number>(0);
@@ -79,40 +45,50 @@ export default function App() {
   const [localCoords, setLocalCoords] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [txSeq, setTxSeq] = useState<number>(0);
 
-  // References for socket, client id, and sequence numbers
-  const socketRef = useRef<WebSocket | null>(null);
+  // References
+  const connectionRef = useRef<CursorWireConnection | null>(null);
+  const interpolationRef = useRef<CursorInterpolationManager>(new CursorInterpolationManager());
+  const cursorDomRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const myIdRef = useRef<string | null>(null);
   const cursorSeqRef = useRef<number>(0);
   const reactionSeqRef = useRef<number>(0);
-  const selectedEmojiRef = useRef<string>('🔥');
-
-  // Phase 7: Per-client, per-message-type sequence trackers
-  const lastAppliedCursorSeqRef = useRef<Map<string, number>>(new Map());
   const lastAppliedReactionSeqRef = useRef<Map<string, number>>(new Map());
 
-  // Phase 8: Reconnection state tracking
-  const reconnectAttemptsRef = useRef<number>(0);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isUnmountingRef = useRef<boolean>(false);
-
-  // Throttling state references (outgoing)
+  // Throttling state
   const lastSendTimeRef = useRef<number>(0);
   const pendingPosRef = useRef<{ x: number; y: number } | null>(null);
   const throttleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Interpolation state references (incoming, driven by requestAnimationFrame)
-  const interpolationsRef = useRef<Map<string, CursorInterpolationState>>(new Map());
-  const cursorDomRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  useEffect(() => {
+    injectGlobalStyles();
+  }, []);
 
   useEffect(() => {
     myIdRef.current = myInfo?.id ?? null;
   }, [myInfo]);
 
+  // Shared requestAnimationFrame render loop driven by interpolation manager
   useEffect(() => {
-    selectedEmojiRef.current = selectedEmoji;
-  }, [selectedEmoji]);
+    let animFrameId: number;
 
-  // Keyboard shortcut listener for reaction switching (keys 1-5)
+    const renderLoop = () => {
+      const now = performance.now();
+
+      interpolationRef.current.step(now, (id, x, y) => {
+        const el = cursorDomRefs.current.get(id);
+        if (el) {
+          el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        }
+      });
+
+      animFrameId = requestAnimationFrame(renderLoop);
+    };
+
+    animFrameId = requestAnimationFrame(renderLoop);
+    return () => cancelAnimationFrame(animFrameId);
+  }, []);
+
+  // Keyboard shortcut listener (keys 1-5)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -128,292 +104,113 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  /**
-   * Shared requestAnimationFrame Render Loop for Remote Cursors
-   */
+  // Connection Lifecycle
   useEffect(() => {
-    let animFrameId: number;
+    const conn = new CursorWireConnection(WS_URL, {
+      onStatusChange: (newStatus, attempt) => {
+        setStatus(newStatus);
+        setReconnectAttempt(attempt);
+      },
+      onWelcome: (id, color) => {
+        myIdRef.current = id;
+        setMyInfo({ id, color });
+      },
+      onPresenceUpdate: (updatedClients) => {
+        setClients(updatedClients);
+        const activeIds = new Set(updatedClients.map((c) => c.id));
+        interpolationRef.current.syncActiveClients(activeIds);
 
-    const renderLoop = () => {
-      const now = performance.now();
+        setRemoteCursors((prev) => {
+          const next = { ...prev };
+          let changed = false;
+          for (const id of Object.keys(next)) {
+            if (!activeIds.has(id)) {
+              delete next[id];
+              cursorDomRefs.current.delete(id);
+              lastAppliedReactionSeqRef.current.delete(id);
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      },
+      onSnapshot: (cursors: CursorSnapshot[]) => {
+        const now = performance.now();
+        interpolationRef.current.initSnapshot(cursors, myIdRef.current, now);
 
-      for (const [id, interp] of interpolationsRef.current.entries()) {
-        const elapsed = now - interp.startTime;
-        const progress = Math.min(Math.max(elapsed / INTERPOLATION_WINDOW_MS, 0), 1);
-
-        interp.currX = lerp(interp.fromX, interp.toX, progress);
-        interp.currY = lerp(interp.fromY, interp.toY, progress);
-
-        const el = cursorDomRefs.current.get(id);
-        if (el) {
-          el.style.transform = `translate3d(${interp.currX}px, ${interp.currY}px, 0)`;
+        const initialMap: Record<string, { id: string; x: number; y: number }> = {};
+        for (const c of cursors) {
+          if (c.id !== myIdRef.current) {
+            initialMap[c.id] = { id: c.id, x: c.x, y: c.y };
+          }
         }
-      }
+        setRemoteCursors((prev) => ({ ...prev, ...initialMap }));
+      },
+      onCursorMove: (msg: CursorMoveMessage) => {
+        if (!msg.id || msg.id === myIdRef.current) return;
 
-      animFrameId = requestAnimationFrame(renderLoop);
-    };
+        const accepted = interpolationRef.current.updateTarget(
+          msg.id,
+          msg.x,
+          msg.y,
+          msg.seq,
+          performance.now()
+        );
 
-    animFrameId = requestAnimationFrame(renderLoop);
-
-    return () => {
-      cancelAnimationFrame(animFrameId);
-    };
-  }, []);
-
-  /**
-   * WebSocket Connection Lifecycle with Bounded Reconnect
-   */
-  useEffect(() => {
-    isUnmountingRef.current = false;
-
-    const connect = () => {
-      if (isUnmountingRef.current) return;
-
-      const socket = new WebSocket(WS_URL);
-      socketRef.current = socket;
-
-      if (import.meta.env.DEV) {
-        window.socket = socket;
-        window.cursorwireSocket = socket;
-        window.sendRaw = (data: unknown) => {
-          if (socket.readyState !== WebSocket.OPEN) return;
-          const payload = typeof data === 'string' ? data : JSON.stringify(data);
-          socket.send(payload);
-        };
-
-        window.injectStaleCursor = (staleSeq = 1) => {
-          if (socket.readyState !== WebSocket.OPEN) return;
-          const msg: CursorMoveMessage = {
-            type: 'cursor-move',
-            x: 60,
-            y: 60,
-            seq: staleSeq,
-          };
-          socket.send(JSON.stringify(msg));
-        };
-
-        window.injectStaleReaction = (staleSeq = 1) => {
-          if (socket.readyState !== WebSocket.OPEN) return;
-          const msg: ReactionMessage = {
-            type: 'reaction',
-            x: 200,
-            y: 200,
-            emoji: '⚠️',
-            seq: staleSeq,
-          };
-          socket.send(JSON.stringify(msg));
-        };
-      }
-
-      socket.onopen = () => {
-        setStatus('connected');
-        reconnectAttemptsRef.current = 0;
-        setReconnectAttempt(0);
-        if (reconnectTimeoutRef.current) {
-          clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = null;
-        }
-      };
-
-      socket.onmessage = (event) => {
-        if (typeof event.data !== 'string') return;
-
-        const result = parseAndValidateMessage(event.data);
-        if (!result.success) return;
-
-        const msg = result.data;
-
-        switch (msg.type) {
-          case 'welcome':
-            myIdRef.current = msg.id;
-            setMyInfo({ id: msg.id, color: msg.color });
-            break;
-
-          case 'presence-update': {
-            setClients(msg.clients);
-            const activeIds = new Set(msg.clients.map((c) => c.id));
-
-            for (const id of Array.from(interpolationsRef.current.keys())) {
-              if (!activeIds.has(id)) {
-                interpolationsRef.current.delete(id);
-                cursorDomRefs.current.delete(id);
-                lastAppliedCursorSeqRef.current.delete(id);
-                lastAppliedReactionSeqRef.current.delete(id);
-              }
-            }
-
-            setRemoteCursors((prev) => {
-              const next = { ...prev };
-              let changed = false;
-              for (const id of Object.keys(next)) {
-                if (!activeIds.has(id)) {
-                  delete next[id];
-                  changed = true;
-                }
-              }
-              return changed ? next : prev;
-            });
-            break;
-          }
-
-          case 'presence-snapshot': {
-            const now = performance.now();
-            const initialRemoteCursors: Record<string, RemoteCursor> = {};
-
-            for (const cursor of msg.cursors) {
-              if (cursor.id === myIdRef.current) continue;
-
-              interpolationsRef.current.set(cursor.id, {
-                fromX: cursor.x,
-                fromY: cursor.y,
-                toX: cursor.x,
-                toY: cursor.y,
-                currX: cursor.x,
-                currY: cursor.y,
-                startTime: now,
-              });
-
-              lastAppliedCursorSeqRef.current.set(cursor.id, cursor.seq);
-
-              initialRemoteCursors[cursor.id] = {
-                id: cursor.id,
-                x: cursor.x,
-                y: cursor.y,
-                seq: cursor.seq,
-              };
-            }
-
-            setRemoteCursors((prev) => ({
-              ...prev,
-              ...initialRemoteCursors,
-            }));
-            break;
-          }
-
-          case 'cursor-move': {
-            if (!msg.id || msg.id === myIdRef.current) break;
-
-            const lastSeq = lastAppliedCursorSeqRef.current.get(msg.id) ?? -1;
-            if (msg.seq <= lastSeq) {
-              setDiscardedStaleCount((prev) => prev + 1);
-              break;
-            }
-
-            lastAppliedCursorSeqRef.current.set(msg.id, msg.seq);
-
-            const now = performance.now();
-            const existing = interpolationsRef.current.get(msg.id);
-
-            if (!existing) {
-              interpolationsRef.current.set(msg.id, {
-                fromX: msg.x,
-                fromY: msg.y,
-                toX: msg.x,
-                toY: msg.y,
-                currX: msg.x,
-                currY: msg.y,
-                startTime: now,
-              });
-            } else {
-              existing.fromX = existing.currX;
-              existing.fromY = existing.currY;
-              existing.toX = msg.x;
-              existing.toY = msg.y;
-              existing.startTime = now;
-            }
-
-            setRemoteCursors((prev) => ({
-              ...prev,
-              [msg.id!]: {
-                id: msg.id!,
-                x: msg.x,
-                y: msg.y,
-                seq: msg.seq,
-              },
-            }));
-            break;
-          }
-
-          case 'reaction': {
-            const senderId = msg.id || 'unknown';
-
-            const lastSeq = lastAppliedReactionSeqRef.current.get(senderId) ?? -1;
-            if (msg.seq <= lastSeq) {
-              setDiscardedStaleCount((prev) => prev + 1);
-              break;
-            }
-
-            lastAppliedReactionSeqRef.current.set(senderId, msg.seq);
-
-            const newReaction: ActiveReaction = {
-              key: `${senderId}-${msg.seq}-${Date.now()}-${Math.random()}`,
-              id: senderId,
-              x: msg.x,
-              y: msg.y,
-              emoji: msg.emoji,
-            };
-
-            setReactions((prev) => [...prev, newReaction]);
-
-            setTimeout(() => {
-              setReactions((prev) => prev.filter((r) => r.key !== newReaction.key));
-            }, 900);
-            break;
-          }
-
-          default:
-            break;
-        }
-      };
-
-      socket.onclose = () => {
-        myIdRef.current = null;
-        setMyInfo(null);
-        setClients([]);
-        setRemoteCursors({});
-        setReactions([]);
-        interpolationsRef.current.clear();
-        cursorDomRefs.current.clear();
-        lastAppliedCursorSeqRef.current.clear();
-        lastAppliedReactionSeqRef.current.clear();
-
-        if (isUnmountingRef.current) {
-          setStatus('disconnected');
+        if (!accepted) {
+          setDiscardedStaleCount((prev) => prev + 1);
           return;
         }
 
-        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-          reconnectAttemptsRef.current += 1;
-          setReconnectAttempt(reconnectAttemptsRef.current);
-          setStatus('reconnecting');
-
-          const delay = Math.min(
-            BASE_RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttemptsRef.current - 1),
-            6000
-          );
-          reconnectTimeoutRef.current = setTimeout(connect, delay);
-        } else {
-          setStatus('disconnected');
+        setRemoteCursors((prev) => ({
+          ...prev,
+          [msg.id!]: { id: msg.id!, x: msg.x, y: msg.y },
+        }));
+      },
+      onReaction: (msg: ReactionMessage) => {
+        const senderId = msg.id || 'unknown';
+        const lastSeq = lastAppliedReactionSeqRef.current.get(senderId) ?? -1;
+        if (msg.seq <= lastSeq) {
+          setDiscardedStaleCount((prev) => prev + 1);
+          return;
         }
+        lastAppliedReactionSeqRef.current.set(senderId, msg.seq);
+
+        const newReaction: ActiveReaction = {
+          key: `${senderId}-${msg.seq}-${Date.now()}-${Math.random()}`,
+          id: senderId,
+          x: msg.x,
+          y: msg.y,
+          emoji: msg.emoji,
+        };
+
+        setReactions((prev) => [...prev, newReaction]);
+        setTimeout(() => {
+          setReactions((prev) => prev.filter((r) => r.key !== newReaction.key));
+        }, 900);
+      },
+    });
+
+    connectionRef.current = conn;
+    conn.connect();
+
+    // Dev test hooks
+    if (import.meta.env.DEV) {
+      window.socket = conn.getSocket() ?? undefined;
+      window.cursorwireSocket = conn.getSocket() ?? undefined;
+      window.sendRaw = (data: unknown) => conn.sendRaw(data);
+      window.injectStaleCursor = (staleSeq = 1) => {
+        conn.sendCursorMove(60, 60, staleSeq);
       };
-
-      socket.onerror = () => {};
-    };
-
-    connect();
+      window.injectStaleReaction = (staleSeq = 1) => {
+        conn.sendReaction(200, 200, '⚠️', staleSeq);
+      };
+    }
 
     const transmitCursor = (x: number, y: number) => {
-      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-
       cursorSeqRef.current += 1;
       setTxSeq(cursorSeqRef.current);
-      const msg: CursorMoveMessage = {
-        type: 'cursor-move',
-        x,
-        y,
-        seq: cursorSeqRef.current,
-      };
-      socketRef.current.send(JSON.stringify(msg));
+      conn.sendCursorMove(x, y, cursorSeqRef.current);
       lastSendTimeRef.current = performance.now();
     };
 
@@ -451,59 +248,31 @@ export default function App() {
       if (target && target.closest('button, a, input, select, textarea, [role="button"], [data-no-burst]')) {
         return;
       }
-
-      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-
       reactionSeqRef.current += 1;
-      const reactionMsg: ReactionMessage = {
-        type: 'reaction',
-        x: Math.round(e.clientX),
-        y: Math.round(e.clientY),
-        emoji: selectedEmojiRef.current,
-        seq: reactionSeqRef.current,
-      };
-      socketRef.current.send(JSON.stringify(reactionMsg));
+      conn.sendReaction(
+        Math.round(e.clientX),
+        Math.round(e.clientY),
+        selectedEmoji,
+        reactionSeqRef.current
+      );
     };
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('click', handleCanvasClick);
 
     return () => {
-      isUnmountingRef.current = true;
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('click', handleCanvasClick);
-
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
       if (throttleTimerRef.current) {
         clearTimeout(throttleTimerRef.current);
         throttleTimerRef.current = null;
       }
-      if (window.socket === socketRef.current) {
-        delete window.socket;
-        delete window.cursorwireSocket;
-        delete window.sendRaw;
-        delete window.injectStaleCursor;
-        delete window.injectStaleReaction;
-      }
-      if (socketRef.current) {
-        socketRef.current.close();
-      }
+      conn.disconnect();
+      interpolationRef.current.clear();
+      cursorDomRefs.current.clear();
+      lastAppliedReactionSeqRef.current.clear();
     };
-  }, []);
-
-  const manualReconnect = () => {
-    reconnectAttemptsRef.current = 0;
-    setReconnectAttempt(0);
-    setStatus('connecting');
-    if (socketRef.current) {
-      socketRef.current.close();
-    }
-    const socket = new WebSocket(WS_URL);
-    socketRef.current = socket;
-  };
+  }, [selectedEmoji]);
 
   const clientColorMap = new Map<string, string>(clients.map((c) => [c.id, c.color]));
 
@@ -523,98 +292,30 @@ export default function App() {
         backgroundSize: '32px 32px',
       }}
     >
-      {/* Active Reactions Layer (Discrete CSS Keyframe Bursts) */}
+      {/* Active Reaction Bursts */}
       {reactions.map((r) => (
-        <div
-          key={r.key}
-          style={{
-            position: 'fixed',
-            left: `${r.x}px`,
-            top: `${r.y}px`,
-            pointerEvents: 'none',
-            zIndex: 10000,
-            fontSize: '32px',
-            animation: 'emojiBurst 900ms cubic-bezier(0.16, 1, 0.3, 1) forwards',
-            filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.5))',
-            userSelect: 'none',
-          }}
-        >
-          {r.emoji}
-        </div>
+        <ReactionBurstView key={r.key} reactionKey={r.key} x={r.x} y={r.y} emoji={r.emoji} />
       ))}
 
-      {/* Remote Cursors Layer (Smooth custom LERP driven by requestAnimationFrame) */}
+      {/* Remote Cursors (Linear Interpolation) */}
       {Object.values(remoteCursors).map((cursor) => {
         const color = clientColorMap.get(cursor.id) || '#3b82f6';
         return (
-          <div
+          <RemoteCursorView
             key={cursor.id}
-            ref={(el) => {
-              if (el) {
-                cursorDomRefs.current.set(cursor.id, el);
-              } else {
-                cursorDomRefs.current.delete(cursor.id);
-              }
+            id={cursor.id}
+            x={cursor.x}
+            y={cursor.y}
+            color={color}
+            domRef={(el) => {
+              if (el) cursorDomRefs.current.set(cursor.id, el);
+              else cursorDomRefs.current.delete(cursor.id);
             }}
-            style={{
-              position: 'fixed',
-              left: 0,
-              top: 0,
-              transform: `translate3d(${cursor.x}px, ${cursor.y}px, 0)`,
-              pointerEvents: 'none',
-              zIndex: 9999,
-              transition: 'none',
-              willChange: 'transform',
-            }}
-          >
-            {/* SVG Cursor Pointer with compensating offset so the visual tip (5.5, 3.5) lands precisely at (0, 0) */}
-            <svg
-              width="22"
-              height="22"
-              viewBox="0 0 24 24"
-              fill="none"
-              style={{
-                position: 'absolute',
-                left: '-5.5px',
-                top: '-3.5px',
-                overflow: 'visible',
-                filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.4))',
-              }}
-            >
-              <path
-                d="M5.5 3.5L18.5 11L12 13L9 20L5.5 3.5Z"
-                fill={color}
-                stroke="#0a0c10"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              />
-            </svg>
-
-            {/* Client ID Label: sharp rectangular badge, no pill radius */}
-            <div
-              style={{
-                position: 'absolute',
-                left: '12px',
-                top: '14px',
-                padding: '1px 5px',
-                borderRadius: '2px',
-                backgroundColor: color,
-                color: '#ffffff',
-                fontFamily: 'var(--mono)',
-                fontSize: '10px',
-                fontWeight: 600,
-                letterSpacing: '0.4px',
-                boxShadow: '0 1px 4px rgba(0,0,0,0.35)',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {cursor.id}
-            </div>
-          </div>
+          />
         );
       })}
 
-      {/* DOCKED TOP BAR: Brand, Connection Telemetry, and Active Peer Roster */}
+      {/* Docked Top App Header */}
       <header
         data-no-burst
         style={{
@@ -633,15 +334,7 @@ export default function App() {
           userSelect: 'none',
         }}
       >
-        {/* Left: Brand Identity + Protocol Tag + Connection Status */}
-        <div
-          data-no-burst
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-          }}
-        >
+        <div data-no-burst style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span
             style={{
               fontFamily: 'var(--mono)',
@@ -668,13 +361,7 @@ export default function App() {
             RAW-WS // V1
           </span>
 
-          <div
-            style={{
-              width: '1px',
-              height: '14px',
-              background: '#222733',
-            }}
-          />
+          <div style={{ width: '1px', height: '14px', background: '#222733' }} />
 
           <div
             style={{
@@ -706,7 +393,7 @@ export default function App() {
             />
             <span>
               {status === 'reconnecting'
-                ? `RECONNECTING (${reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`
+                ? `RECONNECTING (${reconnectAttempt}/5)`
                 : status.toUpperCase()}
             </span>
           </div>
@@ -714,7 +401,7 @@ export default function App() {
           {status === 'disconnected' && (
             <button
               type="button"
-              onClick={manualReconnect}
+              onClick={() => connectionRef.current?.manualReconnect()}
               style={{
                 padding: '2px 8px',
                 fontFamily: 'var(--mono)',
@@ -731,15 +418,8 @@ export default function App() {
           )}
         </div>
 
-        {/* Right: Connected Peers Roster */}
-        <div
-          data-no-burst
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}
-        >
+        {/* Presence Roster */}
+        <div data-no-burst style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <span
             style={{
               fontFamily: 'var(--mono)',
@@ -790,7 +470,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* CENTER CANVAS PROMPT */}
+      {/* Canvas Prompt */}
       <div
         style={{
           position: 'absolute',
@@ -812,7 +492,7 @@ export default function App() {
         </p>
       </div>
 
-      {/* REACTION PALETTE DOCK (Clean, professional tool palette above telemetry bar) */}
+      {/* Reaction Palette */}
       <nav
         data-no-burst
         style={{
@@ -889,7 +569,7 @@ export default function App() {
         })}
       </nav>
 
-      {/* DOCKED BOTTOM STATUS / TELEMETRY BAR (Full width engineering status bar) */}
+      {/* Docked Bottom Status Bar */}
       <footer
         style={{
           position: 'fixed',
@@ -931,7 +611,6 @@ export default function App() {
           </span>
         </div>
 
-        {/* Right side of status bar: Dev drawer toggle */}
         {import.meta.env.DEV && (
           <div data-no-burst style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button
@@ -954,7 +633,7 @@ export default function App() {
         )}
       </footer>
 
-      {/* DEV TOOLS DRAWER (Anchored above status bar) */}
+      {/* Dev Verification Drawer */}
       {import.meta.env.DEV && showDevDrawer && (
         <div
           data-no-burst
@@ -1044,3 +723,10 @@ export default function App() {
   );
 }
 
+// Self-mounting entry point when loaded via index.html
+if (typeof document !== 'undefined') {
+  const rootElement = document.getElementById('root');
+  if (rootElement && !rootElement.hasChildNodes()) {
+    createRoot(rootElement).render(<App />);
+  }
+}
