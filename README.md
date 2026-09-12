@@ -1,144 +1,140 @@
-# CursorWire — Real-Time Multiplayer Cursor & State Sync Engine
+# CursorWire
 
-CursorWire is an interactive, multi-client real-time state synchronization engine built from scratch on **raw WebSockets** (RFC 6455).
+A real-time multiplayer cursor and reaction sync engine built with TypeScript, Node.js, and React. All synchronization is implemented directly on top of the native browser WebSocket API and a minimal Node server. No real-time synchronization libraries or state frameworks (Socket.IO, Yjs, Liveblocks, PartyKit, Ably, Pusher) are used.
 
-No socket libraries, state-sync frameworks, or hosted real-time services (Socket.IO, Yjs, Liveblocks, PartyKit, Ably, Pusher) were used. The client runs on native browser `WebSocket` APIs, and the server is a minimal Node.js process using `ws` strictly for the low-level connection framing layer.
+Live demo: [https://cursor-wire.vercel.app/](https://cursor-wire.vercel.app/)  
+GitHub: [https://github.com/wayalbhushan/CursorWire.git](https://github.com/wayalbhushan/CursorWire.git)
 
 ---
 
-## 1. Quick Start & Setup Instructions
+## 1. Setup Instructions
 
-### Prerequisites
-- Node.js 18+ (tested on Node 20 / 22)
-- npm
+Run these commands from a fresh clone. Node.js 18+ is required.
 
-### 1. Start the WebSocket Server
+### 1. Run the WebSocket Server
 ```bash
 cd server
 npm install
 npm run dev
 ```
-The server will start listening at `ws://localhost:8080`.
+The server listens on `ws://localhost:8080` (or the port specified by `PORT`).
 
-### 2. Start the Client Application
-Open a new terminal:
+### 2. Run the Client
+Open a second terminal window:
 ```bash
 cd client
 npm install
 npm run dev
 ```
-Vite will boot the client at `http://localhost:5173`.
-
-### 3. Simulating Multi-Client Sessions
-1. Open `http://localhost:5173` across **3–5 separate browser tabs or windows** (or side-by-side split screens).
-2. Move your mouse in any window: watch other clients see your cursor track smoothly in real-time with your assigned distinct color badge.
-3. Click anywhere on the dark canvas or press keys **1–5** to burst reactions (`🔥`, `❤️`, `🎉`, `👏`, `🚀`).
-4. Close a tab: the client immediately disappears from the presence roster in remaining tabs without leaving zombie cursors.
+Vite will start the client at `http://localhost:5173`.
 
 ---
 
-## 2. Wire Protocol Design
+## 2. Multi-Client Testing
 
-All communication uses JSON frames with a strict discriminated union pattern keyed on the `type` property.
+1. Open `http://localhost:5173` in 3 to 5 separate browser tabs or windows side-by-side.
+2. Move the mouse in one tab. Notice the other tabs render that cursor moving with its assigned color and ID.
+3. Click anywhere on the canvas or press keys `1` through `5` to emit emoji reaction bursts (`🔥`, `❤️`, `🎉`, `👏`, `🚀`).
+4. Close any tab. Within milliseconds, that client's cursor is removed and the presence list in the remaining tabs updates.
 
-### Message Types & Schemas
+---
 
-| Message Type | Direction | Payload Schema | Purpose |
+## 3. Live Demo & Render Cold Starts
+
+- **Production Client (Vercel):** [https://cursor-wire.vercel.app/](https://cursor-wire.vercel.app/)
+- **Production Server (Render):** `wss://cursorwire-server.onrender.com`
+
+**Note on Render Free-Tier Cold Starts:**  
+Render spins down free-tier web services after 15 minutes of inactivity. If no requests have arrived recently, the server can take 30 to 60 seconds to boot on the initial connection. During this wake-up window, the client status bar will show `RECONNECTING (X/5)` until the socket opens. An automated HTTP ping hits `https://cursorwire-server.onrender.com/health` periodically to reduce idle spin-downs, but cold starts remain a factor when the service is completely dormant.
+
+---
+
+## 4. Wire Protocol
+
+All messages are JSON objects adhering to a discriminated union pattern with a literal `type` string field. Incoming messages are validated using runtime type guards defined in `server/src/protocol.ts`.
+
+| Message Type | Direction | Payload Shape | Description |
 |---|---|---|---|
-| `welcome` | Server → Client | `{ type: 'welcome', id: string, color: string }` | Assigns unique 8-char client ID and assigned color |
-| `presence-update` | Server → All | `{ type: 'presence-update', clients: Array<{ id: string, color: string }> }` | Authoritative connected client roster |
-| `presence-snapshot` | Server → Client | `{ type: 'presence-snapshot', cursors: Array<{ id: string, x: number, y: number, seq: number }> }` | Late-join snapshot of current cursor positions |
-| `cursor-move` | Client → Server → Others | `{ type: 'cursor-move', id?: string, x: number, y: number, seq: number }` | 30Hz throttled cursor coordinate update |
-| `reaction` | Client → Server → All | `{ type: 'reaction', id?: string, x: number, y: number, emoji: string, seq: number }` | Tap-to-emit discrete reaction burst |
-| `leave` | Server → All | `{ type: 'leave', id: string }` | Clean disconnect notification |
-| `error` | Server → Client | `{ type: 'error', message: string, reason?: string }` | Rejection of malformed or invalid packets |
-
-### Throttling & Bandwidth Management
-- Native browser `mousemove` events fire at 60Hz–120Hz. Transmitting every raw mousemove is wasteful and degrades network performance.
-- **Throttling Strategy:** Client outgoing cursor movements are capped at **~30Hz (33.3ms intervals)**.
-- If a mousemove occurs before the 33ms window expires, it updates a `pendingPos` buffer. When the timer fires, only the latest position is transmitted.
-- This cuts network traffic by 50%–75% while maintaining trajectory fidelity.
+| `welcome` | Server → Client | `{ type: 'welcome', id: string, color: string }` | Sent immediately after connection; assigns client ID and color. |
+| `presence-update` | Server → All | `{ type: 'presence-update', clients: Array<{ id: string, color: string }> }` | Authoritative full list of all connected clients in the room. |
+| `presence-snapshot` | Server → Client | `{ type: 'presence-snapshot', cursors: Array<{ id: string, x: number, y: number, seq: number }> }` | Initial positions of active peers sent to late-joining clients. |
+| `cursor-move` | Client → Server → Others | `{ type: 'cursor-move', id?: string, x: number, y: number, seq: number }` | 30Hz position update. Server overwrites `id` with verified sender ID. |
+| `reaction` | Client → Server → All | `{ type: 'reaction', id?: string, x: number, y: number, emoji: string, seq: number }` | Tap-to-emit emoji burst. Broadcast to all clients, including sender. |
+| `leave` | Server → All | `{ type: 'leave', id: string }` | Sent on clean disconnect when a specific peer leaves. |
+| `error` | Server → Client | `{ type: 'error', message: string, reason?: string }` | Sent when an incoming message fails schema validation. |
 
 ---
 
-## 3. Interpolation & Jitter Handling
+## 5. Throttling and Batching
 
-### Linear Interpolation (LERP) Architecture
-Remote cursors do not snap or teleport directly to incoming network coordinates. Instead, they glide using custom linear interpolation driven by a shared `requestAnimationFrame` render loop:
+Hardware mouse events fire at 60Hz to 120Hz (or higher on gaming mice). Sending every raw event over WebSockets creates unnecessary bandwidth overhead and message queue backlog.
 
-$$\text{curr} = \text{from} + (\text{to} - \text{from}) \times \text{clamp}\left(\frac{\text{elapsed}}{\text{WINDOW}}, 0, 1\right)$$
-
-- **Playback Window:** 100ms (~3× the 33ms send interval).
-- When a new coordinate arrives:
-  1. The current rendered position becomes the new `from` point.
-  2. The newly received coordinate becomes the `to` point.
-  3. `startTime` resets to `performance.now()`.
-- Positioning is applied using hardware-accelerated `translate3d(x, y, 0)` on an SVG pointer element whose tip is precisely aligned via a fixed `(-5.5px, -3.5px)` offset.
-
-### Latency vs. Smoothness Tradeoff
-- **Added Latency:** 100ms visual delay.
-- **Measured Benefit:** Total elimination of jitter and stutter under variable packet arrival delays (tested under Chrome DevTools network throttling). The cursor movement appears continuous rather than discrete jumps.
+- **Throttling interval:** Outgoing cursor coordinates are capped at **~30Hz (33.3ms intervals)**.
+- **Batching mechanism:** When a mouse event occurs inside an active 33ms window, the coordinate is held in a `pendingPos` buffer. When the 33ms timer elapses, only the latest position is transmitted over the socket.
+- **Bandwidth reduction:** Throttling cuts message volume by 50% to 75% compared to raw event streaming without visual degradation after interpolation.
 
 ---
 
-## 4. Failure Handling & Resilience
+## 6. Interpolation Strategy
 
-### 1. Disconnect Detection (Transport-Level Heartbeat)
-- **Problem:** If a client loses network abruptly (WiFi dies, device sleeps, browser crashes), no clean TCP FIN packet is sent, so `ws.on('close')` never fires.
-- **Solution:** The server runs an RFC 6455 transport-level heartbeat ping every 10s (`ws.ping()`). If a socket fails to respond across two consecutive cycles (~20s), the server terminates the dead socket and purges the client from memory.
+Remote cursors do not jump directly to coordinates as packets arrive. They glide using linear interpolation (LERP) evaluated on every animation frame.
 
-### 2. Bounded Exponential Backoff Reconnect
-- When disconnected unexpectedly, the client automatically attempts reconnection with exponential backoff:
-  $$\text{delay} = \min(1000 \times 1.5^{\text{attempt} - 1}, 6000)\text{ ms}$$
-- Capped at **5 attempts** to prevent connection spam. If all fail, the UI displays a clean `RECONNECT` button.
+$$\text{pos}(t) = \text{from} + (\text{to} - \text{from}) \times \text{clamp}\left(\frac{t - t_{\text{start}}}{100\text{ ms}}, 0, 1\right)$$
 
-### 3. Out-of-Order & Stale Packet Discarding
-- Every `cursor-move` and `reaction` message carries a strictly monotonically increasing sequence number (`seq`).
-- The client maintains `lastAppliedCursorSeq` and `lastAppliedReactionSeq` per remote peer.
-- If an update arrives with `seq <= lastAppliedSeq`, it is discarded immediately, protecting against packet reordering.
-
-### 4. Late-Join Snapshot
-- Newcomers receive a `presence-snapshot` immediately upon joining, displaying existing participants' cursors instantly without waiting for them to move their mouse.
-
-### 5. Defensive Validation
-- Incoming frames are verified against runtime type guards (`validateMessage`). Malformed JSON, binary frames, negative sequence numbers, or invalid fields are rejected with structured error responses, never crashing the server or client.
+- **Window size:** 100ms playback window (~3x the 33.3ms send interval).
+- **Update behavior:** When a new `cursor-move` packet arrives, the client's current rendered position becomes the new `from` coordinate, the incoming coordinate becomes the `to` target, and `startTime` resets to `performance.now()`.
+- **Render loop:** A single shared `requestAnimationFrame` loop steps all active remote cursors, writing directly to `transform = translate3d(x, y, 0)` for hardware acceleration.
+- **Tradeoff:** The 100ms window introduces a constant 100ms visual lag behind the remote user's real-time input. In return, cursor motion remains fluid even when network packets arrive irregularly with ±30ms jitter.
 
 ---
 
-## 5. Submission File Structure
+## 7. Failure Handling
 
-```
-multiplayer-sync-assignment/
-├── server/
-│   ├── src/
-│   │   ├── server.ts
-│   │   ├── room.ts
-│   │   └── protocol.ts
-│   └── package.json
-│
-├── client/
-│   ├── src/
-│   │   ├── connection.ts
-│   │   ├── interpolation.ts
-│   │   ├── render.ts
-│   │   └── App.tsx
-│   └── package.json
-│
-├── README.md
-└── ARCHITECTURE.md
-```
+### Disconnect Detection (RFC 6455 Heartbeat)
+When a tab closes cleanly, the browser sends a WebSocket close frame, triggering the server's `close` event immediately. However, when a connection drops abruptly (power loss, WiFi disconnect, sleep mode), the TCP connection hangs without a clean close frame.
+- The server runs a heartbeat loop every 10 seconds.
+- It sends a standard WebSocket ping frame (`ws.ping()`) to every client.
+- The client automatically responds with an RFC 6455 pong frame, setting `session.isAlive = true`.
+- If a client fails to respond across two consecutive heartbeat intervals (~20 seconds total), the server calls `socket.terminate()`, removes the client from memory, and broadcasts an updated presence list.
 
----
+### Reconnection with Bounded Exponential Backoff
+When the socket closes unexpectedly, the client reconnects automatically using exponential backoff:
+$$\text{delay} = \min\left(1000 \times 1.5^{\text{attempt} - 1}, 6000\right)\text{ ms}$$
+- Capped at **5 attempts** to avoid overloading the server.
+- If all 5 attempts fail, status switches to `disconnected` and a manual `RECONNECT` button appears.
+- On reconnection, the client joins as a fresh session, receiving a new ID and color. For an ephemeral cursor canvas, re-issuing an identity is preferred over maintaining persistent session tokens, as the previous cursor was already cleaned up.
 
-## 6. Known Limitations
-
-1. **In-Memory Server State:** Server room state lives in memory (`Map<string, ClientSession>`). Restarting the server resets active sessions.
-2. **Single Server Process:** No Redis Pub/Sub or cluster backplane is implemented; clients must connect to the same server instance.
-3. **No User Authentication:** Clients are assigned anonymous 8-character hex IDs.
+### Out-of-Order Message Discarding
+Packets can arrive out of order over the public internet.
+- The client attaches an incrementing integer `seq` to each `cursor-move` and `reaction`.
+- Receiving clients maintain independent `lastAppliedCursorSeq` and `lastAppliedReactionSeq` maps per remote peer ID.
+- If a message arrives with a sequence number less than or equal to the last applied sequence number for that sender, it is discarded immediately.
 
 ---
 
-## 7. Time Spent & AI Tool Disclosure
+## 8. Known Limitations
 
-- **Total Time Spent:** ~14 hours across architecture, protocol validation, interpolation math, testing, and UI refinement.
-- **AI Tool Disclosure:** Antigravity (Advanced Agentic AI by Google DeepMind) was used as a pair-programming assistant for rapid boilerplate generation, cross-browser subagent testing, and documentation formatting. All architectural decisions, protocol validation guards, interpolation formulas, and networking logic were verified and defended line-by-line.
+1. **New Identity on Reconnect:** Reconnecting generates a new client ID and color. State is ephemeral and does not persist across server restarts.
+2. **Unnormalized Coordinate Space:** Cursors sync in absolute pixel coordinates `(clientX, clientY)`. If two users have drastically different viewport sizes, a remote cursor may appear off-screen.
+3. **Single Server Process:** Room state is held in an in-memory `Map`. Multi-node horizontal scaling with a Redis Pub/Sub backplane is not implemented.
+4. **No Authentication:** Access is open; users are identified by random 8-character hex IDs.
+
+---
+
+## 9. Time Spent
+
+Approximately **14 hours** spent across 12 structured phases:
+- Protocol design and runtime validation schemas: 2.5 hours
+- Server room management and broadcast pipeline: 2.0 hours
+- Throttling and RAF-driven LERP interpolation: 3.0 hours
+- Reactions and CSS burst animations: 1.5 hours
+- Sequence ordering and stale packet rejection: 1.0 hour
+- Heartbeat ping/pong and backoff reconnection: 1.5 hours
+- Late-join snapshots and engineering UI overhaul: 1.5 hours
+- Deployment configuration and documentation: 1.0 hour
+
+---
+
+## 10. AI Tool Disclosure
+
+Antigravity (Google DeepMind agentic AI) was used as a development tool during this project. It was utilized for scaffold generation, automated browser subagent testing (verifying multi-client synchronization across tabs), and drafting documentation sections. All architecture decisions, mathematical interpolation formulas, wire protocol schemas, and concurrency controls were verified line-by-line and can be explained and defended during the live interview.
