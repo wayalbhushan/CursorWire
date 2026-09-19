@@ -1,0 +1,79 @@
+.reaction-dock {
+  position: fixed;
+  bottom: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: row; 
+  align-items: center;
+  gap: 4px;
+  background: #12141a;
+  border: 1px solid #222733;
+  padding: 4px 6px;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+}
+
+/* Optional vertical column modifier class */
+.reaction-dock--column {
+  flex-direction: column;
+  bottom: auto;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 6px 4px;
+}
+
+.reaction-dock__label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: #6b7280;
+  padding: 0 6px 0 2px;
+  border-right: 1px solid #222733;
+  margin-right: 2px;
+}
+
+.reaction-dock--column .reaction-dock__label {
+  border-right: none;
+  border-bottom: 1px solid #222733;
+  margin-right: 0;
+  margin-bottom: 2px;
+  padding: 2px 0 4px 0;
+  width: 100%;
+  text-align: center;
+}
+
+.reaction-dock__btn {
+  position: relative;
+  width: 36px;
+  height: 34px;
+  padding: 0;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.reaction-dock__btn--selected {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.reaction-dock__badge {
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  font-family: var(--mono);
+  font-size: 8px;
+  color: #6b7280;
+  line-height: 1;
+}
+
+.reaction-dock__badge--selected {
+  color: #ffffff;
+}

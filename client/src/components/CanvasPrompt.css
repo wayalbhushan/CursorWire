@@ -1,0 +1,19 @@
+.canvas-prompt {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.12);
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.canvas-prompt p {
+  margin: 0;
+  font-weight: 500;
+}

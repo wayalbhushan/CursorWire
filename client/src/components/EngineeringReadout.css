@@ -1,0 +1,42 @@
+.engineering-readout {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 26px;
+  background: #0d0f14;
+  border-top: 1px solid #1e222d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #6b7280;
+  z-index: 45;
+  user-select: none;
+}
+
+.engineering-readout__telemetry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.engineering-readout__sep {
+  color: #272c38;
+}
+
+.engineering-readout__stale--warn {
+  color: #f59e0b;
+}
+
+.engineering-readout__stale--clean {
+  color: #6b7280;
+}
+
+.engineering-readout__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

@@ -1,0 +1,79 @@
+.dev-tools-drawer {
+  position: fixed;
+  bottom: 32px;
+  right: 12px;
+  width: 280px;
+  background: #12141a;
+  border: 1px solid #222733;
+  border-radius: 4px;
+  padding: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  font-size: 11px;
+  color: #d1d5db;
+  z-index: 60;
+}
+
+.dev-tools-drawer__title {
+  font-family: var(--mono);
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #f3f4f6;
+  font-size: 11px;
+  border-bottom: 1px solid #1e222d;
+  padding-bottom: 4px;
+}
+
+.dev-tools-drawer__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.dev-tools-drawer__btn {
+  padding: 4px 8px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  border-radius: 2px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.dev-tools-drawer__footer {
+  border-top: 1px solid #1e222d;
+  padding-top: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.dev-tools-drawer__count {
+  font-weight: 700;
+}
+
+.dev-tools-drawer__count--warn {
+  color: #ef4444;
+}
+
+.dev-tools-drawer__count--ok {
+  color: #10b981;
+}
+
+.dev-tools-toggle {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid #2a313d;
+  border-radius: 2px;
+  color: #9ca3af;
+  cursor: pointer;
+}
+
+.dev-tools-toggle--active {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}

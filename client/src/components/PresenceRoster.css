@@ -1,0 +1,42 @@
+.presence-roster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.presence-roster__label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #6b7280;
+  text-transform: uppercase;
+}
+
+.presence-roster__chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.presence-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 2px;
+  background: #13161f;
+  border: 1px solid #222733;
+  color: #9ca3af;
+}
+
+.presence-chip--me {
+  background: rgba(255, 255, 255, 0.05);
+  color: #f3f4f6;
+}
+
+.presence-chip__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+}
