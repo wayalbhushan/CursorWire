@@ -1,7 +1,14 @@
 import { useEffect, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import './App.css';
-import { CursorWireConnection, type ConnectionStatus } from './connection.js';
+import {
+  CursorWireConnection,
+  type ConnectionStatus,
+  type ClientInfo,
+  type CursorSnapshot,
+  type CursorMoveMessage,
+  type ReactionMessage,
+} from './connection.js';
 import { CursorInterpolationManager } from './interpolation.js';
 import { RemoteCursorView, ReactionBurstView } from './render.js';
 import { TopBar } from './components/TopBar.js';
@@ -10,12 +17,6 @@ import { CanvasPrompt } from './components/CanvasPrompt.js';
 import { ReactionDock } from './components/ReactionDock.js';
 import { EngineeringReadout } from './components/EngineeringReadout.js';
 import { DevToolsDrawer } from './components/DevToolsDrawer.js';
-import {
-  type ClientInfo,
-  type CursorSnapshot,
-  type CursorMoveMessage,
-  type ReactionMessage,
-} from '../../server/src/protocol.js';
 
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
 const THROTTLE_INTERVAL_MS = 33; // ~30Hz mouse transmission

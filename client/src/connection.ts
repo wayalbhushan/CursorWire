@@ -1,11 +1,263 @@
-import {
-  parseAndValidateMessage,
-  type SocketMessage,
-  type ClientInfo,
-  type CursorSnapshot,
-  type CursorMoveMessage,
-  type ReactionMessage,
-} from '../../server/src/protocol.js';
+/**
+ * Protocol Definitions & Client Connection for CursorWire
+ *
+ * Self-contained transport layer and wire protocol definitions
+ * for the client application.
+ */
+
+export interface ClientInfo {
+  id: string;
+  color: string;
+}
+
+export interface CursorSnapshot {
+  id: string;
+  x: number;
+  y: number;
+  seq: number;
+}
+
+export interface JoinMessage {
+  type: 'join';
+}
+
+export interface WelcomeMessage {
+  type: 'welcome';
+  id: string;
+  color: string;
+}
+
+export interface PresenceUpdateMessage {
+  type: 'presence-update';
+  clients: ClientInfo[];
+}
+
+export interface PresenceSnapshotMessage {
+  type: 'presence-snapshot';
+  cursors: CursorSnapshot[];
+}
+
+export interface CursorMoveMessage {
+  type: 'cursor-move';
+  id?: string;
+  x: number;
+  y: number;
+  seq: number;
+}
+
+export interface ReactionMessage {
+  type: 'reaction';
+  id?: string;
+  x: number;
+  y: number;
+  emoji: string;
+  seq: number;
+}
+
+export interface LeaveMessage {
+  type: 'leave';
+  id: string;
+}
+
+export interface ErrorMessage {
+  type: 'error';
+  message: string;
+  reason?: string;
+}
+
+export type SocketMessage =
+  | JoinMessage
+  | WelcomeMessage
+  | PresenceUpdateMessage
+  | PresenceSnapshotMessage
+  | CursorMoveMessage
+  | ReactionMessage
+  | LeaveMessage
+  | ErrorMessage;
+
+export type ValidationResult =
+  | { success: true; data: SocketMessage }
+  | { success: false; error: string };
+
+export function validateMessage(raw: unknown): ValidationResult {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { success: false, error: 'Message payload must be a non-null object' };
+  }
+
+  const obj = raw as Record<string, unknown>;
+
+  if (typeof obj.type !== 'string') {
+    return { success: false, error: 'Message must have a string "type" field' };
+  }
+
+  switch (obj.type) {
+    case 'join': {
+      return { success: true, data: { type: 'join' } };
+    }
+
+    case 'welcome': {
+      if (typeof obj.id !== 'string' || obj.id.trim() === '') {
+        return { success: false, error: 'Welcome message must include a non-empty string "id"' };
+      }
+      if (typeof obj.color !== 'string' || obj.color.trim() === '') {
+        return { success: false, error: 'Welcome message must include a non-empty string "color"' };
+      }
+      return { success: true, data: { type: 'welcome', id: obj.id, color: obj.color } };
+    }
+
+    case 'presence-update': {
+      if (!Array.isArray(obj.clients)) {
+        return { success: false, error: 'Presence-update "clients" must be an array' };
+      }
+      for (let i = 0; i < obj.clients.length; i++) {
+        const item = obj.clients[i];
+        if (typeof item !== 'object' || item === null) {
+          return { success: false, error: `Presence-update client at index ${i} must be an object` };
+        }
+        const clientObj = item as Record<string, unknown>;
+        if (typeof clientObj.id !== 'string' || clientObj.id.trim() === '') {
+          return { success: false, error: `Presence-update client at index ${i} missing valid "id"` };
+        }
+        if (typeof clientObj.color !== 'string' || clientObj.color.trim() === '') {
+          return { success: false, error: `Presence-update client at index ${i} missing valid "color"` };
+        }
+      }
+      return {
+        success: true,
+        data: {
+          type: 'presence-update',
+          clients: obj.clients as ClientInfo[],
+        },
+      };
+    }
+
+    case 'presence-snapshot': {
+      if (!Array.isArray(obj.cursors)) {
+        return { success: false, error: 'Presence-snapshot "cursors" must be an array' };
+      }
+      for (let i = 0; i < obj.cursors.length; i++) {
+        const item = obj.cursors[i];
+        if (typeof item !== 'object' || item === null) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} must be an object` };
+        }
+        const c = item as Record<string, unknown>;
+        if (typeof c.id !== 'string' || c.id.trim() === '') {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} missing valid "id"` };
+        }
+        if (typeof c.x !== 'number' || !Number.isFinite(c.x)) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} invalid "x"` };
+        }
+        if (typeof c.y !== 'number' || !Number.isFinite(c.y)) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} invalid "y"` };
+        }
+        if (typeof c.seq !== 'number' || !Number.isInteger(c.seq) || c.seq < 0) {
+          return { success: false, error: `Presence-snapshot cursor at index ${i} invalid "seq"` };
+        }
+      }
+      return {
+        success: true,
+        data: {
+          type: 'presence-snapshot',
+          cursors: obj.cursors as CursorSnapshot[],
+        },
+      };
+    }
+
+    case 'cursor-move': {
+      if (typeof obj.x !== 'number' || !Number.isFinite(obj.x)) {
+        return { success: false, error: 'Cursor move "x" must be a finite number' };
+      }
+      if (typeof obj.y !== 'number' || !Number.isFinite(obj.y)) {
+        return { success: false, error: 'Cursor move "y" must be a finite number' };
+      }
+      if (typeof obj.seq !== 'number' || !Number.isInteger(obj.seq) || obj.seq < 0) {
+        return { success: false, error: 'Cursor move "seq" must be a non-negative integer' };
+      }
+      if (obj.id !== undefined && typeof obj.id !== 'string') {
+        return { success: false, error: 'Cursor move "id", if provided, must be a string' };
+      }
+
+      const msg: CursorMoveMessage = {
+        type: 'cursor-move',
+        x: obj.x,
+        y: obj.y,
+        seq: obj.seq,
+      };
+      if (typeof obj.id === 'string') {
+        msg.id = obj.id;
+      }
+      return { success: true, data: msg };
+    }
+
+    case 'reaction': {
+      if (typeof obj.x !== 'number' || !Number.isFinite(obj.x)) {
+        return { success: false, error: 'Reaction "x" must be a finite number' };
+      }
+      if (typeof obj.y !== 'number' || !Number.isFinite(obj.y)) {
+        return { success: false, error: 'Reaction "y" must be a finite number' };
+      }
+      if (typeof obj.seq !== 'number' || !Number.isInteger(obj.seq) || obj.seq < 0) {
+        return { success: false, error: 'Reaction "seq" must be a non-negative integer' };
+      }
+      if (typeof obj.emoji !== 'string' || obj.emoji.trim().length === 0) {
+        return { success: false, error: 'Reaction "emoji" must be a non-empty string' };
+      }
+      if (obj.id !== undefined && typeof obj.id !== 'string') {
+        return { success: false, error: 'Reaction "id", if provided, must be a string' };
+      }
+
+      const msg: ReactionMessage = {
+        type: 'reaction',
+        x: obj.x,
+        y: obj.y,
+        emoji: obj.emoji,
+        seq: obj.seq,
+      };
+      if (typeof obj.id === 'string') {
+        msg.id = obj.id;
+      }
+      return { success: true, data: msg };
+    }
+
+    case 'leave': {
+      if (typeof obj.id !== 'string' || obj.id.trim() === '') {
+        return { success: false, error: 'Leave message must include a non-empty string "id"' };
+      }
+      return { success: true, data: { type: 'leave', id: obj.id } };
+    }
+
+    case 'error': {
+      if (typeof obj.message !== 'string') {
+        return { success: false, error: 'Error message must include a string "message"' };
+      }
+      const msg: ErrorMessage = {
+        type: 'error',
+        message: obj.message,
+      };
+      if (typeof obj.reason === 'string') {
+        msg.reason = obj.reason;
+      }
+      return { success: true, data: msg };
+    }
+
+    default:
+      return { success: false, error: `Unrecognized message type: "${obj.type}"` };
+  }
+}
+
+export function parseAndValidateMessage(rawText: string): ValidationResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (err) {
+    return {
+      success: false,
+      error: `Malformed JSON: ${err instanceof Error ? err.message : 'Parse error'}`,
+    };
+  }
+
+  return validateMessage(parsed);
+}
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'error';
 

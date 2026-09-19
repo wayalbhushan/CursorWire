@@ -1,5 +1,5 @@
 import React from 'react';
-import { type ClientInfo } from '../../../server/src/protocol.js';
+import type { ClientInfo } from '../connection.js';
 import './PresenceRoster.css';
 
 export interface PresenceRosterProps {

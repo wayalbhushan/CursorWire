@@ -1,4 +1,4 @@
-import { type CursorSnapshot } from '../../server/src/protocol.js';
+import type { CursorSnapshot } from './connection.js';
 
 export interface CursorInterpolationState {
   fromX: number;
