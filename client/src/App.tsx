@@ -53,6 +53,8 @@ export default function App() {
   const [txSeq, setTxSeq] = useState<number>(0);
 
   // References
+  const selectedEmojiRef = useRef<string>(selectedEmoji);
+  selectedEmojiRef.current = selectedEmoji;
   const connectionRef = useRef<CursorWireConnection | null>(null);
   const interpolationRef = useRef<CursorInterpolationManager>(new CursorInterpolationManager());
   const cursorDomRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -255,7 +257,7 @@ export default function App() {
       conn.sendReaction(
         Math.round(e.clientX),
         Math.round(e.clientY),
-        selectedEmoji,
+        selectedEmojiRef.current,
         reactionSeqRef.current
       );
     };
@@ -275,7 +277,7 @@ export default function App() {
       cursorDomRefs.current.clear();
       lastAppliedReactionSeqRef.current.clear();
     };
-  }, [selectedEmoji]);
+  }, []);
 
   const clientColorMap = new Map<string, string>(clients.map((c) => [c.id, c.color]));
 
